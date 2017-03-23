@@ -66,31 +66,30 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
 #ifdef PROFILE
   timer.start("Support Matches");
 #endif
-  vector<support_pt> p_support = computeSupportMatches(desc1.I_desc,desc2.I_desc);
+  p_support_ = computeSupportMatches(desc1.I_desc,desc2.I_desc);
 
 #ifdef PROFILE
   timer.start("Delaunay Triangulation");
 #endif
-  vector<triangle> tri_1 = computeDelaunayTriangulation(p_support,0);
-  vector<triangle> tri_2 = computeDelaunayTriangulation(p_support,1);
-
+  tri_1_ = computeDelaunayTriangulation(p_support_,0);
+  tri_2_ = computeDelaunayTriangulation(p_support_,1);
 #ifdef PROFILE
   timer.start("Disparity Planes");
 #endif
-  computeDisparityPlanes(p_support,tri_1,0);
-  computeDisparityPlanes(p_support,tri_2,1);
+  computeDisparityPlanes(p_support_,tri_1_,0);
+  computeDisparityPlanes(p_support_,tri_2_,1);
 
 #ifdef PROFILE
   timer.start("Grid");
 #endif
-  createGrid(p_support,disparity_grid_1,grid_dims,0);
-  createGrid(p_support,disparity_grid_2,grid_dims,1);
+  createGrid(p_support_,disparity_grid_1,grid_dims,0);
+  createGrid(p_support_,disparity_grid_2,grid_dims,1);
 
 #ifdef PROFILE
   timer.start("Matching");
 #endif
-  computeDisparity(p_support,tri_1,disparity_grid_1,grid_dims,desc1.I_desc,desc2.I_desc,0,D1);
-  computeDisparity(p_support,tri_2,disparity_grid_2,grid_dims,desc1.I_desc,desc2.I_desc,1,D2);
+  computeDisparity(p_support_,tri_1_,disparity_grid_1,grid_dims,desc1.I_desc,desc2.I_desc,0,D1);
+  computeDisparity(p_support_,tri_2_,disparity_grid_2,grid_dims,desc1.I_desc,desc2.I_desc,1,D2);
 
 #ifdef PROFILE
   timer.start("L/R Consistency Check");

@@ -3,14 +3,18 @@
     <!-- Arguments: input stereo namespace and output elas namespace -->
     <arg name="stereo" default="stereo"/>
     <arg name="elas_ns" default="elas"/>
+    <!--
     <group ns="$(arg stereo)/left">
         <node name="left_rect" pkg="image_proc" type="image_proc"/>
     </group>
     <group ns="$(arg stereo)/right">
         <node name="right_rect" pkg="image_proc" type="image_proc"/>
     </group>
+    -->
     <node name="$(arg elas_ns)" pkg="elas_ros" type="elas_ros">
-        <remap from="stereo" to="$(arg stereo)"/>
+    <!--        <remap from="stereo" to="$(arg stereo)"/>
+    -->
+        <remap from="stereo" to="fla1/falcam"/>
         <remap from="image" to="image_rect"/>
     </node>
 </launch>

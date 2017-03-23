@@ -160,9 +160,7 @@ public:
   //               if subsampling is not active their size is width x height,
   //               otherwise width/2 x height/2 (rounded towards zero)
   void process (uint8_t* I1,uint8_t* I2,float* D1,float* D2,const int32_t* dims);
-  
-private:
-  
+
   struct support_pt {
     int32_t u;
     int32_t v;
@@ -177,6 +175,13 @@ private:
     triangle(int32_t c1,int32_t c2,int32_t c3):c1(c1),c2(c2),c3(c3){}
   };
 
+  // returns support points
+  const std::vector<support_pt> &getSupportPoints() const { return (p_support_); }
+  // returns triangles
+  const std::vector<triangle> &getLeftTriangles() const { return (tri_1_); }
+
+private:
+  
   inline uint32_t getAddressOffsetImage (const int32_t& u,const int32_t& v,const int32_t& width) {
     return v*width+u;
   }
@@ -222,7 +227,14 @@ private:
   
   // parameter set
   parameters param;
-  
+
+  // support points
+  std::vector<support_pt> p_support_;
+
+  // left and right triangles
+  std::vector<triangle> tri_1_;
+  std::vector<triangle> tri_2_;
+
   // memory aligned input images + dimensions
   uint8_t *I1,*I2;
   int32_t width,height,bpl;

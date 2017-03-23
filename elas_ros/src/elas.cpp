@@ -23,10 +23,17 @@
 
 #include <ros/ros.h>
 
+#include <std_msgs/MultiArrayLayout.h>
+#include <std_msgs/MultiArrayDimension.h>
+#include <std_msgs/Int32MultiArray.h>
+
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CameraInfo.h>
+#include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/image_encodings.h>
 #include <stereo_msgs/DisparityImage.h>
+
+#include <visualization_msgs/Marker.h>
 
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -34,7 +41,6 @@
 #include <message_filters/sync_policies/approximate_time.h>
 
 #include <image_transport/subscriber_filter.h>
-
 #include <image_geometry/stereo_camera_model.h>
 
 #include <cv_bridge/cv_bridge.h>
@@ -77,6 +83,9 @@ public:
     depth_pub_.reset(new Publisher(local_it.advertise("depth", 1)));
     pc_pub_.reset(new ros::Publisher(local_nh.advertise<PointCloud>("point_cloud", 1)));
     elas_fd_pub_.reset(new ros::Publisher(local_nh.advertise<elas_ros::ElasFrameData>("frame_data", 1)));
+    support_pt_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("support_points", 1)));
+    triangle_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("triangles", 1)));
+    triangle_list_pub_.reset(new ros::Publisher(local_nh.advertise<visualization_msgs::Marker>("triangle_list", 1)));
 
     pub_disparity_ = local_nh.advertise<stereo_msgs::DisparityImage>("disparity", 1);
 
@@ -143,6 +152,90 @@ public:
   typedef message_filters::Synchronizer<ExactPolicy> ExactSync;
   typedef message_filters::Synchronizer<ApproximatePolicy> ApproximateSync;
   typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloud;
+
+  void publish_triangles(const sensor_msgs::ImageConstPtr& l_image_msg,
+                         const std::vector<Elas::triangle> &triangles) {
+    if (triangle_pub_->getNumSubscribers() > 0) {
+      sensor_msgs::PointCloud::Ptr msg(new sensor_msgs::PointCloud());
+      msg->header = l_image_msg->header;
+      msg->points.resize(triangles.size());
+      for (int i = 0; i < triangles.size(); i++) {
+        // a bit ugly to store ints as floats...
+        msg->points[i].x = triangles[i].c1;
+        msg->points[i].y = triangles[i].c2;
+        msg->points[i].z = triangles[i].c3;
+      }
+      triangle_pub_->publish(msg);
+    }
+  }
+  
+  void publish_triangle_list(const sensor_msgs::ImageConstPtr& l_image_msg,
+                             const std::vector<Elas::support_pt> &pt,
+                             const std::vector<Elas::triangle> &triangles,
+                             const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
+                             const sensor_msgs::CameraInfoConstPtr& r_info_msg) {
+    if (triangle_list_pub_->getNumSubscribers() > 0) {
+      image_geometry::StereoCameraModel model;
+      model.fromCameraInfo(*l_info_msg, *r_info_msg);
+
+      visualization_msgs::Marker::Ptr msg(new visualization_msgs::Marker());
+      msg->header = l_image_msg->header;
+      msg->points.resize(triangles.size());
+      msg->ns = "elas_triangle_list";
+      msg->id = 0;
+      msg->type = visualization_msgs::Marker::TRIANGLE_LIST;
+      msg->action = visualization_msgs::Marker::ADD;
+      msg->pose.position.x = 0.0;
+      msg->pose.position.y = 0.0;
+      msg->pose.position.z = 0.0;
+      msg->pose.orientation.x = 0.0;
+      msg->pose.orientation.y = 0.0;
+      msg->pose.orientation.z = 0.0;
+      msg->pose.orientation.w = 1.0;
+      msg->scale.x = 1.0;
+      msg->scale.y = 1.0;
+      msg->scale.z = 1.0;
+      msg->color.g = 1.0;
+      msg->color.a = 1.0;
+      std_msgs::ColorRGBA c;
+      c.r = 1.0;
+      c.g = 0.0;
+      c.b = 1.0;
+      for (int i = 0; i < triangles.size(); i++) {
+        std::vector<Elas::support_pt> vert;
+        vert.push_back(pt[triangles[i].c1]);
+        vert.push_back(pt[triangles[i].c2]);
+        vert.push_back(pt[triangles[i].c3]);
+        for (int j = 0; j < vert.size(); j++) {
+          cv::Point2d left_uv(vert[j].u, vert[j].v);
+          cv::Point3d pcv;
+          model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
+          geometry_msgs::Point p;
+          p.x = pcv.x;
+          p.y = pcv.y;
+          p.z = pcv.z;
+          msg->points.push_back(p);
+          msg->colors.push_back(c);
+        }
+      }
+      triangle_list_pub_->publish(msg);
+    }
+  }
+ 
+  void publish_support_points(const sensor_msgs::ImageConstPtr& l_image_msg,
+                              const std::vector<Elas::support_pt> &points) {
+    if (support_pt_pub_->getNumSubscribers() > 0) {
+      sensor_msgs::PointCloud::Ptr msg(new sensor_msgs::PointCloud());
+      msg->header = l_image_msg->header;
+      msg->points.resize(points.size());
+      for (int i = 0; i < points.size(); i++) {
+        msg->points[i].x = points[i].u;
+        msg->points[i].y = points[i].v;
+        msg->points[i].z = points[i].d;
+      }
+      support_pt_pub_->publish(msg);
+    }
+  }
 
   void publish_point_cloud(const sensor_msgs::ImageConstPtr& l_image_msg, 
                            float* l_disp_data, const std::vector<int32_t>& inliers,
@@ -309,6 +402,14 @@ public:
     // Process
     elas_->process(l_image_data, r_image_data, l_disp_data, r_disp_data, dims);
 
+    const std::vector<Elas::support_pt> points = elas_->getSupportPoints();
+
+    std::cout << "---------------- points: " << points.size() << std::endl;
+    for (std::vector<Elas::support_pt>::const_iterator p = points.begin();
+         p != points.end(); ++p) {
+      std::cout << "  p: " << p->u << " " << p->v << " " << p->d << std::endl;
+    }
+    
     // Find the max for scaling the image colour
     float disp_max = 0;
     for (int32_t i=0; i<width*height; i++)
@@ -346,6 +447,10 @@ public:
     disp_pub_->publish(out_msg.toImageMsg());
     depth_pub_->publish(out_depth_msg.toImageMsg());
     publish_point_cloud(l_image_msg, l_disp_data, inliers, width, height, l_info_msg, r_info_msg);
+    publish_support_points(l_image_msg, elas_->getSupportPoints());
+    publish_triangles(l_image_msg, elas_->getLeftTriangles());
+    publish_triangle_list(l_image_msg, elas_->getSupportPoints(),
+                          elas_->getLeftTriangles(), l_info_msg, r_info_msg);
 
     pub_disparity_.publish(disp_msg);
 
@@ -363,6 +468,9 @@ private:
   boost::shared_ptr<Publisher> depth_pub_;
   boost::shared_ptr<ros::Publisher> pc_pub_;
   boost::shared_ptr<ros::Publisher> elas_fd_pub_;
+  boost::shared_ptr<ros::Publisher> support_pt_pub_;
+  boost::shared_ptr<ros::Publisher> triangle_pub_;
+  boost::shared_ptr<ros::Publisher> triangle_list_pub_;
   boost::shared_ptr<ExactSync> exact_sync_;
   boost::shared_ptr<ApproximateSync> approximate_sync_;
   boost::shared_ptr<Elas> elas_;
