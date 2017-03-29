@@ -180,7 +180,8 @@ public:
 
       visualization_msgs::Marker::Ptr msg(new visualization_msgs::Marker());
       msg->header = l_image_msg->header;
-      msg->points.resize(triangles.size());
+      msg->header.frame_id = "stereocam";
+      msg->points.clear();
       msg->ns = "elas_triangle_list";
       msg->id = 0;
       msg->type = visualization_msgs::Marker::TRIANGLE_LIST;
@@ -201,22 +202,33 @@ public:
       c.r = 1.0;
       c.g = 0.0;
       c.b = 1.0;
+      c.a = 1.0;
       for (int i = 0; i < triangles.size(); i++) {
         std::vector<Elas::support_pt> vert;
         vert.push_back(pt[triangles[i].c1]);
         vert.push_back(pt[triangles[i].c2]);
         vert.push_back(pt[triangles[i].c3]);
-        for (int j = 0; j < vert.size(); j++) {
-          cv::Point2d left_uv(vert[j].u, vert[j].v);
-          cv::Point3d pcv;
-          model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
-          geometry_msgs::Point p;
-          p.x = pcv.x;
-          p.y = pcv.y;
-          p.z = pcv.z;
-          msg->points.push_back(p);
-          msg->colors.push_back(c);
+        const int MIN_DISP(2);  // anything below is questionable!
+        if (vert[0].d > MIN_DISP &&
+            vert[1].d > MIN_DISP &&
+            vert[2].d > MIN_DISP) {
+          for (int j = 0; j < 3; j++) {
+            cv::Point2d left_uv(vert[j].u, vert[j].v);
+            cv::Point3d pcv;
+            model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
+            //std::cout << i << " " << j << " uv: " << left_uv << " d: " << vert[j].d << " 3d: " << pcv << std::endl;
+            geometry_msgs::Point p;
+            p.x = pcv.x;
+            p.y = pcv.y;
+            p.z = pcv.z;
+            msg->points.push_back(p);
+            msg->colors.push_back(c);
+          }
         }
+      }
+      std::cout << "num points: " << msg->points.size() << " / 3 " << (double)msg->points.size()/(double)3 << std::endl;
+      if ((msg->points.size() % 3) != 0) {
+        std::cout << "ERROR: not mult 3" << std:: endl;
       }
       triangle_list_pub_->publish(msg);
     }
@@ -404,12 +416,6 @@ public:
 
     const std::vector<Elas::support_pt> points = elas_->getSupportPoints();
 
-    std::cout << "---------------- points: " << points.size() << std::endl;
-    for (std::vector<Elas::support_pt>::const_iterator p = points.begin();
-         p != points.end(); ++p) {
-      std::cout << "  p: " << p->u << " " << p->v << " " << p->d << std::endl;
-    }
-    
     // Find the max for scaling the image colour
     float disp_max = 0;
     for (int32_t i=0; i<width*height; i++)
