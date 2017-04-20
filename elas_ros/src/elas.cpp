@@ -32,6 +32,7 @@
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/image_encodings.h>
 #include <stereo_msgs/DisparityImage.h>
+#include <mav_high_level_msgs/Mesh.h>
 
 #include <visualization_msgs/Marker.h>
 
@@ -86,6 +87,7 @@ public:
     support_pt_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("support_points", 1)));
     triangle_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("triangles", 1)));
     triangle_list_pub_.reset(new ros::Publisher(local_nh.advertise<visualization_msgs::Marker>("triangle_list", 1)));
+	mesh_pub_.reset(new ros::Publisher(local_nh.advertise<mav_high_level_msgs::Mesh>("mesh", 1)));
 
     pub_disparity_ = local_nh.advertise<stereo_msgs::DisparityImage>("disparity", 1);
 
@@ -169,6 +171,48 @@ public:
     }
   }
   
+  void publish_mesh(const sensor_msgs::ImageConstPtr& l_image_msg,
+					const std::vector<Elas::support_pt> &pt,
+					const std::vector<Elas::triangle> &triangles,
+					const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
+					const sensor_msgs::CameraInfoConstPtr& r_info_msg) {
+    if (mesh_pub_->getNumSubscribers() > 0) {
+      image_geometry::StereoCameraModel model;
+      model.fromCameraInfo(*l_info_msg, *r_info_msg);
+
+	  mav_high_level_msgs::Mesh::Ptr msg(new mav_high_level_msgs::Mesh());
+      msg->header = l_image_msg->header;
+      msg->header.frame_id = "stereocam";
+	  msg->faces.clear();
+      msg->norms.clear();
+	  geometry_msgs::Point n;	//normal vector
+	  n.x = 0; n.y = 0; n.z = 1;
+      for (int i = 0; i < triangles.size(); i++) {
+        std::vector<Elas::support_pt> vert;
+        vert.push_back(pt[triangles[i].c1]);
+        vert.push_back(pt[triangles[i].c2]);
+        vert.push_back(pt[triangles[i].c3]);
+        const int MIN_DISP(2);  // anything below is questionable!
+        if (vert[0].d > MIN_DISP && vert[1].d > MIN_DISP && vert[2].d > MIN_DISP) {
+			mav_high_level_msgs::Face face;
+			for (int j = 0; j < 3; j++) {
+				cv::Point2d left_uv(vert[j].u, vert[j].v);
+				cv::Point3d pcv;
+				model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
+				geometry_msgs::Point p;
+				p.x = pcv.x;
+				p.y = pcv.y;
+				p.z = pcv.z;
+				face.vertices.push_back(p);
+			}
+			msg->faces.push_back(face);
+            msg->norms.push_back(n);
+		}
+		//std::cout << "num faces: " << msg->faces.size() << std::endl;
+		mesh_pub_->publish(msg);
+	  }
+	}
+  }
   void publish_triangle_list(const sensor_msgs::ImageConstPtr& l_image_msg,
                              const std::vector<Elas::support_pt> &pt,
                              const std::vector<Elas::triangle> &triangles,
@@ -457,6 +501,8 @@ public:
     publish_triangles(l_image_msg, elas_->getLeftTriangles());
     publish_triangle_list(l_image_msg, elas_->getSupportPoints(),
                           elas_->getLeftTriangles(), l_info_msg, r_info_msg);
+    publish_mesh(l_image_msg, elas_->getSupportPoints(),
+				 elas_->getLeftTriangles(), l_info_msg, r_info_msg);
 
     pub_disparity_.publish(disp_msg);
 
@@ -477,6 +523,7 @@ private:
   boost::shared_ptr<ros::Publisher> support_pt_pub_;
   boost::shared_ptr<ros::Publisher> triangle_pub_;
   boost::shared_ptr<ros::Publisher> triangle_list_pub_;
+  boost::shared_ptr<ros::Publisher> mesh_pub_;
   boost::shared_ptr<ExactSync> exact_sync_;
   boost::shared_ptr<ApproximateSync> approximate_sync_;
   boost::shared_ptr<Elas> elas_;

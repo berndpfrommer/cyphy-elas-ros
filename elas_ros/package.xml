@@ -19,7 +19,8 @@
   <depend>libelas</depend> 
   <depend>roscpp</depend> 
   <depend>sensor_msgs</depend> 
-  <depend>stereo_msgs</depend> 
+  <depend>stereo_msgs</depend>
+  <depend>mav_high_level_msgs</depend> 
   <depend>nav_msgs</depend> 
   <depend>message_filters</depend> 
   <depend>image_transport</depend> 
