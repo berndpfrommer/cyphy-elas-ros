@@ -31,6 +31,7 @@
   <depend>pcl</depend> 
   <depend>pcl_conversions</depend> 
   <depend>geometry_msgs</depend> 
-  <depend>message_generation</depend> 
+  <depend>message_generation</depend>
+  <depend>dynamic_reconfigure</depend>
 
 </package>

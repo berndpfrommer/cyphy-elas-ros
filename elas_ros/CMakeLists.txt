@@ -36,12 +36,14 @@ find_package(PCL REQUIRED)
 
 #catkin_package()
 
+# Dynamic reconfigure
+#generate_dynamic_reconfigure_options(cfg/ElasDyn.cfg)
+
 add_definitions(-msse3)
 
 include_directories(src ${libelas_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 
-cs_add_executable(elas_ros
-  src/elas.cpp)
+cs_add_executable(elas_ros src/elas.cpp)
 add_dependencies(elas_ros ${catkin_EXPORTED_TARGETS})
 add_dependencies(elas_ros ${PROJECT_NAME}_gencpp)
 
