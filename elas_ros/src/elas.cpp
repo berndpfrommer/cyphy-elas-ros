@@ -45,6 +45,9 @@
 #include <image_transport/subscriber_filter.h>
 #include <image_geometry/stereo_camera_model.h>
 
+#include <dynamic_reconfigure/server.h>
+
+
 #include <cv_bridge/cv_bridge.h>
 
 #include <pcl_ros/point_cloud.h>
@@ -52,6 +55,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <elas_ros/ElasFrameData.h>
+#include <elas_ros/ElasDynConfig.h>
 
 #include <elas.h>
 
@@ -60,6 +64,7 @@
 class Elas_Proc
 {
 public:
+  typedef elas_ros::ElasDynConfig Config;
   Elas_Proc(const std::string& transport)
   {
     ros::NodeHandle local_nh("~");
@@ -71,6 +76,7 @@ public:
     std::string right_topic = ros::names::clean(stereo_ns + "/right/" + nh.resolveName("image"));
     std::string left_info_topic = stereo_ns + "/left/camera_info";
     std::string right_info_topic = stereo_ns + "/right/camera_info";
+    configServer_.setCallback(boost::bind(&Elas_Proc::configure, this, _1, _2));
 
     image_transport::ImageTransport it(nh);
     left_sub_.subscribe(it, left_topic, 1, transport);
@@ -93,60 +99,13 @@ public:
 #endif
 
     pub_disparity_ = local_nh.advertise<stereo_msgs::DisparityImage>("disparity", 1);
-
-    // Synchronize input topics. Optionally do approximate synchronization.
-    bool approx;
-    local_nh.param("approximate_sync", approx, false);
-    if (approx)
-    {
-      approximate_sync_.reset(new ApproximateSync(ApproximatePolicy(queue_size_),
-                                                  left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
-      approximate_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
-    }
-    else
-    {
-      exact_sync_.reset(new ExactSync(ExactPolicy(queue_size_),
-                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
-      exact_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
-    }
-
-    // Create the elas processing class
-    //param.reset(new Elas::parameters(Elas::MIDDLEBURY));
-    //param.reset(new Elas::parameters(Elas::ROBOTICS));
-    param.reset(new Elas::parameters);
-
-    /* Parameters tunned*/
-    param->disp_min              = 0;
-    param->disp_max              = 255;
-    param->support_threshold     = 0.95;
-    param->support_texture       = 10;
-    param->candidate_stepsize    = 5;
-    param->incon_window_size     = 5;
-    param->incon_threshold       = 5;
-    param->incon_min_support     = 5;
-    param->add_corners           = 0;
-    param->grid_size             = 20;
-    param->beta                  = 0.02;
-    param->gamma                 = 3;
-    param->sigma                 = 1;
-    param->sradius               = 2;
-    param->match_texture         = 1;
-    param->lr_threshold          = 2;
-    param->speckle_sim_threshold = 1;
-    param->speckle_size          = 200;
-    param->ipol_gap_width        = 300;
-    param->filter_median         = 0;
-    param->filter_adaptive_mean  = 1;
-    param->postprocess_only_left = 1;
-    param->subsampling           = 0;
-
-    //param->match_texture = 1;
-    //param->postprocess_only_left = 1;
-    //param->ipol_gap_width = 2;
+    Config cfg;
 #ifdef DOWN_SAMPLE
-    param->subsampling = true;
+    cfg.subsampling = true;
 #endif
-    elas_.reset(new Elas(*param));
+    configToParam(cfg);
+    elas_.reset(new Elas(param_));
+    startSync();
   }
 
   typedef image_transport::SubscriberFilter Subscriber;
@@ -157,6 +116,69 @@ public:
   typedef message_filters::Synchronizer<ExactPolicy> ExactSync;
   typedef message_filters::Synchronizer<ApproximatePolicy> ApproximateSync;
   typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloud;
+
+  void configToParam(const Config &config) {
+#define UPDATE_PARAM(X) if (param_.X != config.X) { param_.X = config.X;  ROS_INFO_STREAM("updated X to " << param_.X); }
+    UPDATE_PARAM(disp_min);
+    UPDATE_PARAM(disp_max);
+    UPDATE_PARAM(support_threshold);
+    UPDATE_PARAM(support_texture);
+    UPDATE_PARAM(candidate_stepsize);
+    UPDATE_PARAM(incon_window_size);
+    UPDATE_PARAM(incon_threshold);
+    UPDATE_PARAM(incon_min_support);
+    UPDATE_PARAM(add_corners);
+    UPDATE_PARAM(grid_size);
+    UPDATE_PARAM(beta);
+    UPDATE_PARAM(gamma);
+    UPDATE_PARAM(sigma);
+    UPDATE_PARAM(sradius);
+    UPDATE_PARAM(match_texture);
+    UPDATE_PARAM(lr_threshold);
+    UPDATE_PARAM(speckle_sim_threshold);
+    UPDATE_PARAM(speckle_size);
+    UPDATE_PARAM(ipol_gap_width);
+    UPDATE_PARAM(filter_median);
+    UPDATE_PARAM(filter_adaptive_mean);
+    UPDATE_PARAM(postprocess_only_left);
+    UPDATE_PARAM(subsampling);
+  }
+
+  bool doApproxSync() const {
+    ros::NodeHandle local_nh("~");
+    bool approx;
+    local_nh.param("approximate_sync", approx, false);
+    return (approx);
+  }
+  
+  void stopSync() {
+    if (doApproxSync()) {
+      approximate_sync_.reset();
+    }  else {
+      exact_sync_.reset();
+    }
+  }
+
+  void startSync() {
+    // Synchronize input topics. Optionally do approximate synchronization.
+    if (doApproxSync()) {
+      approximate_sync_.reset(new ApproximateSync(ApproximatePolicy(queue_size_),
+                                                  left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
+      approximate_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
+    } else {
+      exact_sync_.reset(new ExactSync(ExactPolicy(queue_size_),
+                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
+      exact_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
+    }
+  }
+
+  void configure(Config& config, int level) {
+    ROS_INFO("got dyn config callback!");
+    stopSync();
+    configToParam(config);
+    elas_.reset(new Elas(param_));
+    startSync();
+  }
 
   void publish_triangles(const sensor_msgs::ImageConstPtr& l_image_msg,
                          const std::vector<Elas::triangle> &triangles) {
@@ -404,8 +426,8 @@ public:
     disp_msg->image.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
     disp_msg->image.step     = disp_msg->image.width * sizeof(float);
     disp_msg->image.data.resize(disp_msg->image.height * disp_msg->image.step);
-    disp_msg->min_disparity = param->disp_min;
-    disp_msg->max_disparity = param->disp_max;
+    disp_msg->min_disparity = param_.disp_min;
+    disp_msg->max_disparity = param_.disp_max;
 
     // Stereo parameters
     float f = model_.right().fx();
@@ -521,6 +543,8 @@ private:
   ros::NodeHandle nh;
   Subscriber left_sub_, right_sub_;
   InfoSubscriber left_info_sub_, right_info_sub_;
+  dynamic_reconfigure::Server<elas_ros::ElasDynConfig>  configServer_;
+
   boost::shared_ptr<Publisher> disp_pub_;
   boost::shared_ptr<Publisher> depth_pub_;
   boost::shared_ptr<ros::Publisher> pc_pub_;
@@ -538,8 +562,7 @@ private:
 
   image_geometry::StereoCameraModel model_;
   ros::Publisher pub_disparity_;
-  boost::scoped_ptr<Elas::parameters> param;
-
+  Elas::parameters param_;
 };
 
 int main(int argc, char** argv)
