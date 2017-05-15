@@ -21,6 +21,7 @@
  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define USE_MESH
 #include <ros/ros.h>
 
 #include <std_msgs/MultiArrayLayout.h>
@@ -33,7 +34,7 @@
 #include <sensor_msgs/image_encodings.h>
 #include <stereo_msgs/DisparityImage.h>
 #ifdef USE_MESH
-#include <mav_high_level_msgs/Mesh.h>
+#include <planning_ros_msgs/Mesh.h>
 #endif
 #include <visualization_msgs/Marker.h>
 
@@ -76,6 +77,8 @@ public:
     std::string right_topic = ros::names::clean(stereo_ns + "/right/" + nh.resolveName("image"));
     std::string left_info_topic = stereo_ns + "/left/camera_info";
     std::string right_info_topic = stereo_ns + "/right/camera_info";
+    // setCallback() is supposedly guaranteed to invoke the callback
+    // immediately, with the config default values.
     configServer_.setCallback(boost::bind(&Elas_Proc::configure, this, _1, _2));
 
     image_transport::ImageTransport it(nh);
@@ -95,15 +98,10 @@ public:
     triangle_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("triangles", 1)));
     triangle_list_pub_.reset(new ros::Publisher(local_nh.advertise<visualization_msgs::Marker>("triangle_list", 1)));
 #ifdef USE_MESH
-    mesh_pub_.reset(new ros::Publisher(local_nh.advertise<mav_high_level_msgs::Mesh>("mesh", 1)));
+    mesh_pub_.reset(new ros::Publisher(local_nh.advertise<planning_ros_msgs::Mesh>("mesh", 1)));
 #endif
 
     pub_disparity_ = local_nh.advertise<stereo_msgs::DisparityImage>("disparity", 1);
-    Config cfg;
-#ifdef DOWN_SAMPLE
-    cfg.subsampling = true;
-#endif
-    configToParam(cfg);
     elas_.reset(new Elas(param_));
     startSync();
   }
@@ -118,7 +116,11 @@ public:
   typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloud;
 
   void configToParam(const Config &config) {
-#define UPDATE_PARAM(X) if (param_.X != config.X) { param_.X = config.X;  ROS_INFO_STREAM("updated X to " << param_.X); }
+#define UPDATE_PARAM(X) if (param_.X != config.X) { param_.X = config.X;  ROS_INFO_STREAM("updated " #X " from " << config.X << " to "  << param_.X); }
+#ifdef DOWN_SAMPLE
+    config.subsampling = true;
+    ROS_WARN("forcing subsampling to be true!");
+#endif
     UPDATE_PARAM(disp_min);
     UPDATE_PARAM(disp_max);
     UPDATE_PARAM(support_threshold);
@@ -173,7 +175,6 @@ public:
   }
 
   void configure(Config& config, int level) {
-    ROS_INFO("got dyn config callback!");
     stopSync();
     configToParam(config);
     elas_.reset(new Elas(param_));
@@ -205,7 +206,7 @@ public:
       image_geometry::StereoCameraModel model;
       model.fromCameraInfo(*l_info_msg, *r_info_msg);
 
-      mav_high_level_msgs::Mesh::Ptr msg(new mav_high_level_msgs::Mesh());
+      planning_ros_msgs::Mesh::Ptr msg(new planning_ros_msgs::Mesh());
       msg->header = l_image_msg->header;
       msg->header.frame_id = "stereocam";
       msg->faces.clear();
@@ -219,7 +220,7 @@ public:
         vert.push_back(pt[triangles[i].c3]);
         const int MIN_DISP(2);  // anything below is questionable!
         if (vert[0].d > MIN_DISP && vert[1].d > MIN_DISP && vert[2].d > MIN_DISP) {
-          mav_high_level_msgs::Face face;
+          planning_ros_msgs::Face face;
           for (int j = 0; j < 3; j++) {
             cv::Point2d left_uv(vert[j].u, vert[j].v);
             cv::Point3d pcv;
@@ -296,7 +297,6 @@ public:
           }
         }
       }
-      std::cout << "num points: " << msg->points.size() << " / 3 " << (double)msg->points.size()/(double)3 << std::endl;
       if ((msg->points.size() % 3) != 0) {
         std::cout << "ERROR: not mult 3" << std:: endl;
       }

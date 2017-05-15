@@ -33,5 +33,6 @@
   <depend>geometry_msgs</depend> 
   <depend>message_generation</depend>
   <depend>dynamic_reconfigure</depend>
+  <depend>planning_ros_msgs</depend>
 
 </package>
