@@ -73,6 +73,7 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
 #endif
   tri_1_ = computeDelaunayTriangulation(p_support_,0);
   tri_2_ = computeDelaunayTriangulation(p_support_,1);
+#ifdef DO_EVERYTHING
 #ifdef PROFILE
   timer.start("Disparity Planes");
 #endif
@@ -130,6 +131,7 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
 
 #ifdef PROFILE
   timer.plot();
+#endif
 #endif
 
   // release memory
@@ -368,10 +370,9 @@ vector<Elas::support_pt> Elas::computeSupportMatches (uint8_t* I1_desc,uint8_t* 
     D_candidate_stepsize += D_candidate_stepsize%2;
 
   // create matrix for saving disparity candidates
-  int32_t D_can_width  = 0;
-  int32_t D_can_height = 0;
-  for (int32_t u=0; u<width;  u+=D_candidate_stepsize) D_can_width++;
-  for (int32_t v=0; v<height; v+=D_candidate_stepsize) D_can_height++;
+  int32_t D_can_width  = (width + D_candidate_stepsize - 1) / D_candidate_stepsize;
+  int32_t D_can_height = (height + D_candidate_stepsize - 1) / D_candidate_stepsize;
+
   int16_t* D_can = (int16_t*)calloc(D_can_width*D_can_height,sizeof(int16_t));
 
   // loop variables
