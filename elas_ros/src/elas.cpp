@@ -21,7 +21,6 @@
  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define USE_MESH
 #include <ros/ros.h>
 
 #include <std_msgs/MultiArrayLayout.h>
@@ -33,9 +32,6 @@
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/image_encodings.h>
 #include <stereo_msgs/DisparityImage.h>
-#ifdef USE_MESH
-#include <planning_ros_msgs/Mesh.h>
-#endif
 #include <visualization_msgs/Marker.h>
 
 #include <message_filters/subscriber.h>
@@ -57,6 +53,7 @@
 
 #include <elas_ros/ElasFrameData.h>
 #include <elas_ros/ElasDynConfig.h>
+#include <elas_ros/SparseDepth.h>
 
 #include <elas.h>
 
@@ -97,9 +94,7 @@ public:
     support_pt_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("support_points", 1)));
     triangle_pub_.reset(new ros::Publisher(local_nh.advertise<sensor_msgs::PointCloud>("triangles", 1)));
     triangle_list_pub_.reset(new ros::Publisher(local_nh.advertise<visualization_msgs::Marker>("triangle_list", 1)));
-#ifdef USE_MESH
-    mesh_pub_.reset(new ros::Publisher(local_nh.advertise<planning_ros_msgs::Mesh>("mesh", 1)));
-#endif
+    sparse_depth_pub_.reset(new ros::Publisher(local_nh.advertise<elas_ros::SparseDepth>("sparse_depth", 1)));
 
     pub_disparity_ = local_nh.advertise<stereo_msgs::DisparityImage>("disparity", 1);
     elas_.reset(new Elas(param_));
@@ -196,50 +191,32 @@ public:
       triangle_pub_->publish(msg);
     }
   }
-#ifdef USE_MESH  
-  void publish_mesh(const sensor_msgs::ImageConstPtr& l_image_msg,
-                    const std::vector<Elas::support_pt> &pt,
-                    const std::vector<Elas::triangle> &triangles,
-                    const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
-                    const sensor_msgs::CameraInfoConstPtr& r_info_msg) {
-    if (mesh_pub_->getNumSubscribers() > 0) {
-      image_geometry::StereoCameraModel model;
-      model.fromCameraInfo(*l_info_msg, *r_info_msg);
 
-      planning_ros_msgs::Mesh::Ptr msg(new planning_ros_msgs::Mesh());
-      msg->header = l_image_msg->header;
-      msg->header.frame_id = "stereocam";
-      msg->faces.clear();
-      msg->norms.clear();
-      geometry_msgs::Point n;	//normal vector
-      n.x = 0; n.y = 0; n.z = 1;
-      for (int i = 0; i < triangles.size(); i++) {
-        std::vector<Elas::support_pt> vert;
-        vert.push_back(pt[triangles[i].c1]);
-        vert.push_back(pt[triangles[i].c2]);
-        vert.push_back(pt[triangles[i].c3]);
-        const int MIN_DISP(2);  // anything below is questionable!
-        if (vert[0].d > MIN_DISP && vert[1].d > MIN_DISP && vert[2].d > MIN_DISP) {
-          planning_ros_msgs::Face face;
-          for (int j = 0; j < 3; j++) {
-            cv::Point2d left_uv(vert[j].u, vert[j].v);
-            cv::Point3d pcv;
-            model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
-            geometry_msgs::Point p;
-            p.x = pcv.x;
-            p.y = pcv.y;
-            p.z = pcv.z;
-            face.vertices.push_back(p);
-          }
-          msg->faces.push_back(face);
-          msg->norms.push_back(n);
-        }
-        //std::cout << "num faces: " << msg->faces.size() << std::endl;
-        mesh_pub_->publish(msg);
+  void publish_sparse_depth(const std::vector<Elas::support_pt> &pt,
+                            const std::vector<Elas::triangle> &triangles,
+                            const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
+                            const sensor_msgs::CameraInfoConstPtr& r_info_msg) {
+
+    if (sparse_depth_pub_->getNumSubscribers() > 0) {
+      elas_ros::SparseDepth::Ptr msg(new elas_ros::SparseDepth());
+      msg->header = l_info_msg->header;
+      msg->left_camera  = *l_info_msg;
+      msg->right_camera = *r_info_msg;
+      msg->point.resize(pt.size());
+      msg->triangle.resize(triangles.size());
+      for (int i = 0; i < pt.size(); i++) {
+        msg->point[i].d = pt[i].d;
+        msg->point[i].u = pt[i].u;
+        msg->point[i].v = pt[i].v;
       }
+      for (int i = 0; i < triangles.size(); i++) {
+        msg->triangle[i].c1 = triangles[i].c1;
+        msg->triangle[i].c2 = triangles[i].c2;
+        msg->triangle[i].c3 = triangles[i].c3;
+      }
+      sparse_depth_pub_->publish(msg);
     }
   }
-#endif
   void publish_triangle_list(const sensor_msgs::ImageConstPtr& l_image_msg,
                              const std::vector<Elas::support_pt> &pt,
                              const std::vector<Elas::triangle> &triangles,
@@ -251,7 +228,7 @@ public:
 
       visualization_msgs::Marker::Ptr msg(new visualization_msgs::Marker());
       msg->header = l_image_msg->header;
-      msg->header.frame_id = "stereocam";
+      msg->header.frame_id = l_info_msg->header.frame_id;
       msg->points.clear();
       msg->ns = "elas_triangle_list";
       msg->id = 0;
@@ -307,7 +284,7 @@ public:
   void publish_support_points(const sensor_msgs::ImageConstPtr& l_image_msg,
                               const std::vector<Elas::support_pt> &points) {
     if (support_pt_pub_->getNumSubscribers() > 0) {
-      sensor_msgs::PointCloud::Ptr msg(new sensor_msgs::PointCloud());
+      sensor_msgs::PointCloud:: Ptr msg(new sensor_msgs::PointCloud());
       msg->header = l_image_msg->header;
       msg->points.resize(points.size());
       for (int i = 0; i < points.size(); i++) {
@@ -335,6 +312,7 @@ public:
 
       PointCloud::Ptr point_cloud(new PointCloud());
       point_cloud->header.frame_id = l_info_header.frame_id;
+
       point_cloud->header.stamp = l_info_header.stamp;
       point_cloud->width = 1;
       point_cloud->height = inliers.size();
@@ -523,14 +501,15 @@ public:
     disp_pub_->publish(out_msg.toImageMsg());
     depth_pub_->publish(out_depth_msg.toImageMsg());
     publish_point_cloud(l_image_msg, l_disp_data, inliers, width, height, l_info_msg, r_info_msg);
+#if 0    
     publish_support_points(l_image_msg, elas_->getSupportPoints());
     publish_triangles(l_image_msg, elas_->getLeftTriangles());
     publish_triangle_list(l_image_msg, elas_->getSupportPoints(),
                           elas_->getLeftTriangles(), l_info_msg, r_info_msg);
-#ifdef USE_MESH    
-    publish_mesh(l_image_msg, elas_->getSupportPoints(),
-				 elas_->getLeftTriangles(), l_info_msg, r_info_msg);
-#endif
+#else
+    publish_sparse_depth(elas_->getSupportPoints(),
+                         elas_->getLeftTriangles(), l_info_msg, r_info_msg);
+#endif    
     pub_disparity_.publish(disp_msg);
 
     // Cleanup data
@@ -552,9 +531,7 @@ private:
   boost::shared_ptr<ros::Publisher> support_pt_pub_;
   boost::shared_ptr<ros::Publisher> triangle_pub_;
   boost::shared_ptr<ros::Publisher> triangle_list_pub_;
-#ifdef USE_MESH  
-  boost::shared_ptr<ros::Publisher> mesh_pub_;
-#endif
+  boost::shared_ptr<ros::Publisher> sparse_depth_pub_;
   boost::shared_ptr<ExactSync> exact_sync_;
   boost::shared_ptr<ApproximateSync> approximate_sync_;
   boost::shared_ptr<Elas> elas_;
@@ -562,6 +539,7 @@ private:
 
   image_geometry::StereoCameraModel model_;
   ros::Publisher pub_disparity_;
+
   Elas::parameters param_;
 };
 
