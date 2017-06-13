@@ -145,8 +145,7 @@ public:
   };
 
   // constructor, input: parameters  
-  Elas (parameters param) : param(param) {}
-
+  Elas(parameters param = parameters());
   // deconstructor
   ~Elas () {}
   
@@ -165,7 +164,8 @@ public:
     int32_t u;
     int32_t v;
     int32_t d;
-    support_pt(int32_t u,int32_t v,int32_t d):u(u),v(v),d(d){}
+    uint64_t id;
+    support_pt(int32_t u=0,int32_t v=0,int32_t d=0, uint64_t id=0):u(u),v(v),d(d),id(id){}
   };
 
   struct triangle {
@@ -175,20 +175,27 @@ public:
     triangle(int32_t c1,int32_t c2,int32_t c3):c1(c1),c2(c2),c3(c3){}
   };
 
+  // sets support points
+  void setSupportPoints(std::vector<support_pt> const &sp) { p_support_ = sp; }
   // returns support points
   const std::vector<support_pt> &getSupportPoints() const { return (p_support_); }
+  // returns new support points
+  const std::vector<support_pt> &getNewSupportPoints() const { return (p_support_new_); }
   // returns triangles
   const std::vector<triangle> &getLeftTriangles() const { return (tri_1_); }
+  // returns new triangles
+  const std::vector<triangle> &getNewLeftTriangles() const { return (tri_left_new_); }
 
 private:
   
-  inline uint32_t getAddressOffsetImage (const int32_t& u,const int32_t& v,const int32_t& width) {
+  inline uint32_t getAddressOffsetImage (const int32_t& u,const int32_t& v,const int32_t& width) const {
     return v*width+u;
   }
 
   inline uint32_t getAddressOffsetGrid (const int32_t& x,const int32_t& y,const int32_t& d,const int32_t& width,const int32_t& disp_num) {
     return (y*width+x)*disp_num+d;
   }
+  void print_exist_grid(const uint8_t *grid);
 
   // support point functions
   void removeInconsistentSupportPoints (int16_t* D_can,int32_t D_can_width,int32_t D_can_height);
@@ -196,13 +203,15 @@ private:
                                      int32_t redun_max_dist, int32_t redun_threshold, bool vertical);
   void addCornerSupportPoints (std::vector<support_pt> &p_support);
   inline int16_t computeMatchingDisparity (const int32_t &u,const int32_t &v,uint8_t* I1_desc,uint8_t* I2_desc,const bool &right_image);
-  std::vector<support_pt> computeSupportMatches (uint8_t* I1_desc,uint8_t* I2_desc);
+  uint8_t *filterSupportPoints();
+  std::vector<support_pt> computeSupportMatches (uint8_t* I1_desc,uint8_t* I2_desc, const uint8_t *exist_pt);
 
   // triangulation & grid
   std::vector<triangle> computeDelaunayTriangulation (std::vector<support_pt> p_support,int32_t right_image);
   void computeDisparityPlanes (std::vector<support_pt> p_support,std::vector<triangle> &tri,int32_t right_image);
   void createGrid (std::vector<support_pt> p_support,int32_t* disparity_grid,int32_t* grid_dims,bool right_image);
-
+  void find_new_triangles(const uint8_t *exist_pt, const std::vector<support_pt> &pt,
+                          const std::vector<triangle> &tri, std::vector<support_pt> *new_pt, std::vector<triangle> *new_tri);
   // matching
   inline void updatePosteriorMinimum (__m128i* I2_block_addr,const int32_t &d,const int32_t &w,
                                       const __m128i &xmm1,__m128i &xmm2,int32_t &val,int32_t &min_val,int32_t &min_d);
@@ -230,15 +239,21 @@ private:
 
   // support points
   std::vector<support_pt> p_support_;
+  // new support points
+  std::vector<support_pt> p_support_new_;
 
   // left and right triangles
   std::vector<triangle> tri_1_;
   std::vector<triangle> tri_2_;
+  // new triangles
+  std::vector<triangle> tri_left_new_;
 
   // memory aligned input images + dimensions
   uint8_t *I1,*I2;
   int32_t width,height,bpl;
-  
+
+  // point id
+  int64_t point_id_;
   // profiling timer
 #ifdef PROFILE
   Timer timer;

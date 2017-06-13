@@ -23,5 +23,8 @@ cs_add_library(elas
 #   LIBRARIES elas
 # )
 
+cs_add_executable(process src/main.cpp)
+target_link_libraries(process elas)
+
 cs_install()
 cs_export()

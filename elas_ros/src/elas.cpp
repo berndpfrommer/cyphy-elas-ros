@@ -32,6 +32,9 @@
 #include <sensor_msgs/PointCloud.h>
 #include <sensor_msgs/image_encodings.h>
 #include <stereo_msgs/DisparityImage.h>
+#include <nav_msgs/Odometry.h>
+#include <tf/transform_broadcaster.h>
+
 #include <visualization_msgs/Marker.h>
 
 #include <message_filters/subscriber.h>
@@ -56,8 +59,29 @@
 #include <elas_ros/SparseDepth.h>
 
 #include <elas.h>
+#include <math.h>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/highgui/highgui.hpp>
 
 //#define DOWN_SAMPLE
+
+using nav_msgs::OdometryConstPtr;
+
+static tf::Transform odom_to_tf(const OdometryConstPtr &odom) {
+  const geometry_msgs::Quaternion &q = odom->pose.pose.orientation;
+  const geometry_msgs::Point &T = odom->pose.pose.position;
+  tf::Quaternion qt(q.x, q.y, q.z, q.w);
+  tf::Vector3    Tt(T.x, T.y, T.z);
+  return (tf::Transform(qt, Tt));
+}
+
+#ifdef DEBUG_IMAGE
+static int image_counter(0);
+std::ofstream transform_file("transforms.txt");
+#endif
 
 class Elas_Proc
 {
@@ -74,6 +98,7 @@ public:
     std::string right_topic = ros::names::clean(stereo_ns + "/right/" + nh.resolveName("image"));
     std::string left_info_topic = stereo_ns + "/left/camera_info";
     std::string right_info_topic = stereo_ns + "/right/camera_info";
+    std::string odom_topic = "odom";
     // setCallback() is supposedly guaranteed to invoke the callback
     // immediately, with the config default values.
     configServer_.setCallback(boost::bind(&Elas_Proc::configure, this, _1, _2));
@@ -83,8 +108,10 @@ public:
     right_sub_.subscribe(it, right_topic, 1, transport);
     left_info_sub_.subscribe(nh, left_info_topic, 1);
     right_info_sub_.subscribe(nh, right_info_topic, 1);
+    odom_sub_.subscribe(nh, odom_topic, 1);
 
-    ROS_INFO("Subscribing to:\n%s\n%s\n%s\n%s",left_topic.c_str(),right_topic.c_str(),left_info_topic.c_str(),right_info_topic.c_str());
+    ROS_INFO("Subscribing to:\n%s\n%s\n%s\n%s\n%s",left_topic.c_str(),right_topic.c_str(),left_info_topic.c_str(),right_info_topic.c_str(),
+             odom_topic.c_str());
 
     image_transport::ImageTransport local_it(local_nh);
     disp_pub_.reset(new Publisher(local_it.advertise("image_disparity", 1)));
@@ -103,9 +130,14 @@ public:
 
   typedef image_transport::SubscriberFilter Subscriber;
   typedef message_filters::Subscriber<sensor_msgs::CameraInfo> InfoSubscriber;
+  typedef message_filters::Subscriber<nav_msgs::Odometry> OdomSubscriber;  
   typedef image_transport::Publisher Publisher;
-  typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ExactPolicy;
-  typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> ApproximatePolicy;
+  typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image,
+                                                    sensor_msgs::CameraInfo, sensor_msgs::CameraInfo,
+                                                    nav_msgs::Odometry> ExactPolicy;
+  typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image,
+                                                          sensor_msgs::CameraInfo, sensor_msgs::CameraInfo,
+                                                          nav_msgs::Odometry> ApproximatePolicy;
   typedef message_filters::Synchronizer<ExactPolicy> ExactSync;
   typedef message_filters::Synchronizer<ApproximatePolicy> ApproximateSync;
   typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloud;
@@ -160,12 +192,12 @@ public:
     // Synchronize input topics. Optionally do approximate synchronization.
     if (doApproxSync()) {
       approximate_sync_.reset(new ApproximateSync(ApproximatePolicy(queue_size_),
-                                                  left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
-      approximate_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
+                                                  left_sub_, right_sub_, left_info_sub_, right_info_sub_, odom_sub_) );
+      approximate_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4, _5));
     } else {
       exact_sync_.reset(new ExactSync(ExactPolicy(queue_size_),
-                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_) );
-      exact_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4));
+                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_, odom_sub_) );
+      exact_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4, _5));
     }
   }
 
@@ -264,7 +296,6 @@ public:
             cv::Point2d left_uv(vert[j].u, vert[j].v);
             cv::Point3d pcv;
             model.projectDisparityTo3d(left_uv, vert[j].d, pcv);
-            //std::cout << i << " " << j << " uv: " << left_uv << " d: " << vert[j].d << " 3d: " << pcv << std::endl;
             geometry_msgs::Point p;
             p.x = pcv.x;
             p.y = pcv.y;
@@ -275,7 +306,7 @@ public:
         }
       }
       if ((msg->points.size() % 3) != 0) {
-        std::cout << "ERROR: not mult 3" << std:: endl;
+        ROS_ERROR_STREAM("ERROR: number of points must be mult of 3!");
       }
       triangle_list_pub_->publish(msg);
     }
@@ -385,10 +416,79 @@ public:
     }
   }
 
+  
+  void add_to_support_point_cloud(const std::vector<Elas::support_pt> &pts,
+                                  const tf::Transform &T_world_cam) {
+    const image_geometry::StereoCameraModel &cam = model_;
+    int numPointsAdded(0);
+    for (int i = 0; i < pts.size(); i++) {
+      const Elas::support_pt &sp = pts[i];
+      SupportPointCloud::iterator pci = support_pt_cloud_.find(sp.id);
+
+      if (pci == support_pt_cloud_.end()) {
+        cv::Point3d p3d;
+        cv::Point2d left_uv(sp.u, sp.v);
+        // project to 3d in camera frame
+        cam.projectDisparityTo3d(left_uv, sp.d > 0 ? sp.d : 1e-3, p3d);
+        // transform to world frame
+        const tf::Vector3 v(p3d.x, p3d.y, p3d.z);
+        const tf::Vector3 vt(T_world_cam(v));
+        support_pt_cloud_[sp.id] = cv::Point3d(vt.x(), vt.y(), vt.z());
+        numPointsAdded++;
+      }
+    }
+    //ROS_INFO_STREAM("added " << numPointsAdded << " new points to support point cloud");
+  }
+
+
+  void project_points(std::vector<Elas::support_pt> *ptp,
+                      const tf::Transform &T_cam_world) const {
+#ifdef DEBUG_IMAGE    
+    std::ostringstream convert;
+    convert << image_counter;
+    std::ofstream point_file(("points_" + convert.str() + ".txt").c_str());
+    tf::Vector3          T = T_cam_world.inverse().getOrigin();
+    const tf::Matrix3x3 &R = T_cam_world.inverse().getBasis();
+    transform_file << image_counter << " " <<
+      R[0][0] << " " << R[0][1] << " " << R[0][2] << " " << T[0] << " " <<
+      R[1][0] << " " << R[1][1] << " " << R[1][2] << " " << T[1] << " " <<
+      R[2][0] << " " << R[2][1] << " " << R[2][2] << " " << T[2] << std::endl;
+    transform_file.flush();
+    image_counter++;
+#endif    
+    image_geometry::StereoCameraModel cam = model_;
+    const image_geometry::PinholeCameraModel &lcam = cam.left();
+    cv::Size res = lcam.fullResolution();
+    for (SupportPointCloud::const_iterator pci = support_pt_cloud_.begin();
+         pci != support_pt_cloud_.end(); ++pci) {
+      // transform 3d point to current frame
+      const cv::Point3d &pw = pci->second;   // 3d in world frame
+      const tf::Vector3 v(pw.x, pw.y, pw.z);
+      const tf::Vector3 vt(T_cam_world(v));
+      cv::Point3d pc(vt.x(), vt.y(), vt.z()); // 3d in camera frame
+      if (vt.z() > 0) {
+        // project into left camera image
+        double d = cam.getDisparity(vt.z());
+        cv::Point2d p2dl = lcam.project3dToPixel(pc);
+        if ((p2dl.x > 0) && (p2dl.x < res.width) &&
+            (p2dl.y > 0) && (p2dl.y < res.height)) {
+          ptp->push_back(Elas::support_pt(p2dl.x, p2dl.y, (int)round(d), pci->first));
+        }
+#ifdef DEBUG_IMAGE        
+        point_file << pw.x  << " " << pw.y  << " " << pw.z << " "
+                   << pc.x  << " " << pc.y  << " " << pc.z << " "
+                   << p2dl.x << " " << p2dl.y << " " << d << std::endl;
+#endif        
+      }
+    }
+  }
+
   void process(const sensor_msgs::ImageConstPtr& l_image_msg, 
                const sensor_msgs::ImageConstPtr& r_image_msg,
                const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
-               const sensor_msgs::CameraInfoConstPtr& r_info_msg)
+               const sensor_msgs::CameraInfoConstPtr& r_info_msg,
+               const nav_msgs::OdometryConstPtr &odom_msg
+    )
   {
     ROS_DEBUG("Received images and camera info.");
     // Update the camera model
@@ -420,6 +520,12 @@ public:
     cv_bridge::CvImageConstPtr l_cv_ptr, r_cv_ptr;
     if (l_image_msg->encoding == sensor_msgs::image_encodings::MONO8)
     {
+#ifdef DEBUG_IMAGE      
+      l_cv_ptr = cv_bridge::toCvShare(l_image_msg, sensor_msgs::image_encodings::MONO8);
+      std::ostringstream convert;
+      convert << image_counter;
+      cv::imwrite("image_l_" + convert.str() + ".jpg", l_cv_ptr->image);
+#endif      
       l_image_data = const_cast<uint8_t*>(&(l_image_msg->data[0]));
       l_step = l_image_msg->step;
     }
@@ -428,9 +534,20 @@ public:
       l_cv_ptr = cv_bridge::toCvShare(l_image_msg, sensor_msgs::image_encodings::MONO8);
       l_image_data = l_cv_ptr->image.data;
       l_step = l_cv_ptr->image.step[0];
+#ifdef DEBUG_IMAGE      
+      std::ostringstream convert;
+      convert << image_counter;
+      cv::imwrite("image_l_" + convert.str() + ".jpg", l_cv_ptr->image);
+#endif      
     }
     if (r_image_msg->encoding == sensor_msgs::image_encodings::MONO8)
     {
+#ifdef DEBUG_IMAGE
+      r_cv_ptr = cv_bridge::toCvShare(r_image_msg, sensor_msgs::image_encodings::MONO8);
+      std::ostringstream convert;
+      convert << image_counter;
+      cv::imwrite("image_r_" + convert.str() + ".jpg", r_cv_ptr->image);
+#endif
       r_image_data = const_cast<uint8_t*>(&(r_image_msg->data[0]));
       r_step = r_image_msg->step;
     }
@@ -439,6 +556,11 @@ public:
       r_cv_ptr = cv_bridge::toCvShare(r_image_msg, sensor_msgs::image_encodings::MONO8);
       r_image_data = r_cv_ptr->image.data;
       r_step = r_cv_ptr->image.step[0];
+#ifdef DEBUG_IMAGE
+      std::ostringstream convert;
+      convert << image_counter;
+      cv::imwrite("image_r_" + convert.str() + ".jpg", r_cv_ptr->image);
+#endif      
     }
 
     ROS_ASSERT(l_step == r_step);
@@ -459,11 +581,29 @@ public:
     float* l_disp_data = reinterpret_cast<float*>(&disp_msg->image.data[0]);
     float* r_disp_data = new float[width*height*sizeof(float)];
 
-    // Process
+    const std::vector<Elas::support_pt> points = elas_->getSupportPoints();
+    bool firstTime = points.empty();
+    tf::Matrix3x3 rotmat(-0.008324225326135968, -0.9999613549225855,     0.0028277082785044313,
+                         -0.9997628867409561,    0.008265604744898349,  -0.020145720974759567,
+                          0.02012156972284892,  -0.002994735312130247,  -0.9997930555831545);
+    tf::Vector3 trans(0.054400047716549035,0.002726787577576585,-0.01724244334027849);
+    tf::Transform T_cam_imu(rotmat, trans);
+
+    // T_world_cam = T_world_imu * T_imu_cam
+    tf::Transform T_world_cam = odom_to_tf(odom_msg) * T_cam_imu.inverse();
+
+    std::vector<Elas::support_pt> tpoints;
+    project_points(&tpoints, T_world_cam.inverse());
+    ROS_INFO_STREAM("projected " << tpoints.size() << " out of " << support_pt_cloud_.size());
+    elas_->setSupportPoints(tpoints);
+    // process
     elas_->process(l_image_data, r_image_data, l_disp_data, r_disp_data, dims);
 
-    const std::vector<Elas::support_pt> points = elas_->getSupportPoints();
-
+    
+    //ROS_INFO_STREAM("support points after: " << elas_->getSupportPoints().size());
+    //ROS_INFO_STREAM("new support points: " << elas_->getNewSupportPoints().size());
+    add_to_support_point_cloud(elas_->getNewSupportPoints(), T_world_cam);
+ 
     // Find the max for scaling the image colour
     float disp_max = 0;
     for (int32_t i=0; i<width*height; i++)
@@ -500,15 +640,15 @@ public:
     // Publish
     disp_pub_->publish(out_msg.toImageMsg());
     depth_pub_->publish(out_depth_msg.toImageMsg());
-    publish_point_cloud(l_image_msg, l_disp_data, inliers, width, height, l_info_msg, r_info_msg);
-#if 0    
     publish_support_points(l_image_msg, elas_->getSupportPoints());
     publish_triangles(l_image_msg, elas_->getLeftTriangles());
+#if 0    
+    publish_point_cloud(l_image_msg, l_disp_data, inliers, width, height, l_info_msg, r_info_msg);
     publish_triangle_list(l_image_msg, elas_->getSupportPoints(),
                           elas_->getLeftTriangles(), l_info_msg, r_info_msg);
 #else
-    publish_sparse_depth(elas_->getSupportPoints(),
-                         elas_->getLeftTriangles(), l_info_msg, r_info_msg);
+    publish_sparse_depth(elas_->getNewSupportPoints(),
+                         elas_->getNewLeftTriangles(), l_info_msg, r_info_msg);
 #endif    
     pub_disparity_.publish(disp_msg);
 
@@ -522,6 +662,7 @@ private:
   ros::NodeHandle nh;
   Subscriber left_sub_, right_sub_;
   InfoSubscriber left_info_sub_, right_info_sub_;
+  OdomSubscriber odom_sub_;
   dynamic_reconfigure::Server<elas_ros::ElasDynConfig>  configServer_;
 
   boost::shared_ptr<Publisher> disp_pub_;
@@ -541,6 +682,8 @@ private:
   ros::Publisher pub_disparity_;
 
   Elas::parameters param_;
+  typedef std::map<int64_t, cv::Point3d> SupportPointCloud;
+  SupportPointCloud support_pt_cloud_;
 };
 
 int main(int argc, char** argv)

@@ -30,7 +30,7 @@
   <depend>pcl_ros</depend> 
   <depend>pcl</depend> 
   <depend>pcl_conversions</depend> 
-  <depend>geometry_msgs</depend> 
+  <depend>geometry_msgs</depend>
   <depend>message_generation</depend>
   <depend>dynamic_reconfigure</depend>
   <depend>planning_ros_msgs</depend>
