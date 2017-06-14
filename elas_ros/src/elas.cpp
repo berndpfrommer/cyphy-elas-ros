@@ -224,31 +224,46 @@ public:
     }
   }
 
-  void publish_sparse_depth(const std::vector<Elas::support_pt> &pt,
-                            const std::vector<Elas::triangle> &triangles,
-                            const sensor_msgs::CameraInfoConstPtr& l_info_msg, 
-                            const sensor_msgs::CameraInfoConstPtr& r_info_msg) {
-
+  static bool normal_points_to_camera(const cv::Point3d *vert, double anglim) {
+    cv::Point3d a = vert[1]-vert[0];
+    cv::Point3d b = vert[2]-vert[0];
+    // compute normal vector
+    double axb[3] = {a.y*b.z - a.z*b.y,
+                     a.z*b.x - a.x*b.z,
+                     a.x*b.y - a.y*b.x};
+    double axb_sq = axb[0]*axb[0] + axb[1]*axb[1] + axb[2]*axb[2];
+    // compute vector to center
+    const cv::Point3d c = vert[0] + vert[1] + vert[2];
+    double c_sq = c.x*c.x + c.y*c.y + c.z*c.z;
+    double cdotaxb = c.x*axb[0] + c.y*axb[1] +c.z*axb[2];
+    return (cdotaxb * cdotaxb > axb_sq * c_sq * anglim);
+  }
+  
+  void publish_sparse_depth(const tf::Transform &T_cam_world,
+                            const std::vector<elas_ros::SupportPoint3d> &pt,
+                            const std::vector<Elas::sparse_triangle> &triangles,
+                            const sensor_msgs::CameraInfoConstPtr& l_info_msg) {
     if (sparse_depth_pub_->getNumSubscribers() > 0) {
       elas_ros::SparseDepth::Ptr msg(new elas_ros::SparseDepth());
       msg->header = l_info_msg->header;
-      msg->left_camera  = *l_info_msg;
-      msg->right_camera = *r_info_msg;
       msg->point.resize(pt.size());
       msg->triangle.resize(triangles.size());
       for (int i = 0; i < pt.size(); i++) {
-        msg->point[i].d = pt[i].d;
-        msg->point[i].u = pt[i].u;
-        msg->point[i].v = pt[i].v;
+        msg->point[i].x  = pt[i].x;
+        msg->point[i].y  = pt[i].y;
+        msg->point[i].z  = pt[i].z;
+        msg->point[i].id = pt[i].id;
       }
+      
       for (int i = 0; i < triangles.size(); i++) {
-        msg->triangle[i].c1 = triangles[i].c1;
-        msg->triangle[i].c2 = triangles[i].c2;
-        msg->triangle[i].c3 = triangles[i].c3;
+        msg->triangle[i].c[0] = triangles[i].c[0];
+        msg->triangle[i].c[1] = triangles[i].c[1];
+        msg->triangle[i].c[2] = triangles[i].c[2];
       }
       sparse_depth_pub_->publish(msg);
     }
   }
+
   void publish_triangle_list(const sensor_msgs::ImageConstPtr& l_image_msg,
                              const std::vector<Elas::support_pt> &pt,
                              const std::vector<Elas::triangle> &triangles,
@@ -417,30 +432,79 @@ public:
   }
 
   
-  void add_to_support_point_cloud(const std::vector<Elas::support_pt> &pts,
-                                  const tf::Transform &T_world_cam) {
-    const image_geometry::StereoCameraModel &cam = model_;
+  void add_to_support_point_cloud(const std::vector<elas_ros::SupportPoint3d> &pts) {
     int numPointsAdded(0);
     for (int i = 0; i < pts.size(); i++) {
-      const Elas::support_pt &sp = pts[i];
-      SupportPointCloud::iterator pci = support_pt_cloud_.find(sp.id);
-
-      if (pci == support_pt_cloud_.end()) {
-        cv::Point3d p3d;
-        cv::Point2d left_uv(sp.u, sp.v);
-        // project to 3d in camera frame
-        cam.projectDisparityTo3d(left_uv, sp.d > 0 ? sp.d : 1e-3, p3d);
-        // transform to world frame
-        const tf::Vector3 v(p3d.x, p3d.y, p3d.z);
-        const tf::Vector3 vt(T_world_cam(v));
-        support_pt_cloud_[sp.id] = cv::Point3d(vt.x(), vt.y(), vt.z());
+      const elas_ros::SupportPoint3d &sp = pts[i];
+      if (support_pt_cloud_.count(sp.id) == 0) {
+        support_pt_cloud_[sp.id] = cv::Point3d(sp.x, sp.y, sp.z);
         numPointsAdded++;
       }
     }
-    //ROS_INFO_STREAM("added " << numPointsAdded << " new points to support point cloud");
+  }
+  
+  void support_points_to_3d(std::vector<elas_ros::SupportPoint3d> *pt3d,
+                            const std::vector<Elas::support_pt> &pts,
+                            const tf::Transform &T_world_cam) {
+    const image_geometry::StereoCameraModel &cam = model_;
+    for (int i = 0; i < pts.size(); i++) {
+      const Elas::support_pt &sp = pts[i];
+      cv::Point3d p3d;
+      cv::Point2d left_uv(sp.u, sp.v);
+      // project to 3d in camera frame
+      cam.projectDisparityTo3d(left_uv, sp.d > 0 ? sp.d : 1e-3, p3d);
+      // transform to world frame
+      const tf::Vector3 v(p3d.x, p3d.y, p3d.z);
+      const tf::Vector3 vt(T_world_cam(v));
+      elas_ros::SupportPoint3d sp3d;
+      sp3d.x = vt.x();
+      sp3d.y = vt.y();
+      sp3d.z = vt.z();
+      sp3d.id = sp.id;
+      pt3d->push_back(sp3d);
+    }
   }
 
+  static void disparity_to_3d(const image_geometry::StereoCameraModel &model,
+                              const Elas::support_pt *sp, cv::Point3d *vert) {
+    cv::Point3d c;
+    for (int j = 0; j < 3; j++) {
+      cv::Point2d left_uv(sp[j].u, sp[j].v);
+      cv::Point3d pcv;
+      model.projectDisparityTo3d(left_uv, sp[j].d, vert[j]);
+    }
+  }
 
+  void filter_triangles(std::vector<Elas::sparse_triangle> *filtered,
+                        const std::vector<Elas::support_pt> &pt,
+                        const std::vector<Elas::sparse_triangle> raw,
+                        const image_geometry::StereoCameraModel &model) {
+    double anglim = cos(88.0 * M_PI / 180.0);
+
+    for (int i = 0; i < raw.size(); i++) {
+      const Elas::sparse_triangle &traw = raw[i];
+      Elas::support_pt sp[3];
+      for (int j = 0; j< 3; j++) {
+        int idx = traw.cidx[j];
+        if (idx >= 0 && idx < pt.size()) {
+          sp[j] = pt[idx];
+        } else {
+          std::cout << "out of range!!" << idx << " vs " << pt.size() << std::endl;
+        }
+      }
+
+      const int MIN_DISP(2);  // anything below is questionable!
+      if (sp[0].d > MIN_DISP && sp[1].d > MIN_DISP && sp[2].d > MIN_DISP) {
+        cv::Point3d vert[3];
+        disparity_to_3d(model, sp, vert);
+        if (normal_points_to_camera(vert, anglim)) {
+          filtered->push_back(traw);
+        }
+      }
+    }
+    //std::cout << "filtered triangles: " << raw.size() << " -> " << filtered->size() << std::endl;
+  }
+                        
   void project_points(std::vector<Elas::support_pt> *ptp,
                       const tf::Transform &T_cam_world) const {
 #ifdef DEBUG_IMAGE    
@@ -602,7 +666,9 @@ public:
     
     //ROS_INFO_STREAM("support points after: " << elas_->getSupportPoints().size());
     //ROS_INFO_STREAM("new support points: " << elas_->getNewSupportPoints().size());
-    add_to_support_point_cloud(elas_->getNewSupportPoints(), T_world_cam);
+    std::vector<elas_ros::SupportPoint3d> new_support_points_3d;
+    support_points_to_3d(&new_support_points_3d, elas_->getNewSupportPoints(), T_world_cam);
+    add_to_support_point_cloud(new_support_points_3d);
  
     // Find the max for scaling the image colour
     float disp_max = 0;
@@ -647,8 +713,11 @@ public:
     publish_triangle_list(l_image_msg, elas_->getSupportPoints(),
                           elas_->getLeftTriangles(), l_info_msg, r_info_msg);
 #else
-    publish_sparse_depth(elas_->getNewSupportPoints(),
-                         elas_->getNewLeftTriangles(), l_info_msg, r_info_msg);
+    std::vector<Elas::sparse_triangle> new_triangles;
+    image_geometry::StereoCameraModel model;
+    model.fromCameraInfo(*l_info_msg, *r_info_msg);
+    filter_triangles(&new_triangles, elas_->getSupportPoints(), elas_->getNewLeftTriangles(), model);
+    publish_sparse_depth(T_world_cam.inverse(), new_support_points_3d, new_triangles, l_info_msg);
 #endif    
     pub_disparity_.publish(disp_msg);
 

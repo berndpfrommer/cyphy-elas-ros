@@ -175,6 +175,15 @@ public:
     triangle(int32_t c1,int32_t c2,int32_t c3):c1(c1),c2(c2),c3(c3){}
   };
 
+  struct sparse_triangle {
+    int     cidx[3];
+    int64_t c[3];
+    sparse_triangle(const int *cidx_a, const int64_t *c_a) {
+      memcpy(cidx, cidx_a, sizeof(cidx));
+      memcpy(c, c_a, sizeof(c));
+    }
+  };
+
   // sets support points
   void setSupportPoints(std::vector<support_pt> const &sp) { p_support_ = sp; }
   // returns support points
@@ -184,7 +193,7 @@ public:
   // returns triangles
   const std::vector<triangle> &getLeftTriangles() const { return (tri_1_); }
   // returns new triangles
-  const std::vector<triangle> &getNewLeftTriangles() const { return (tri_left_new_); }
+  const std::vector<sparse_triangle> &getNewLeftTriangles() const { return (tri_left_new_); }
 
 private:
   
@@ -210,8 +219,8 @@ private:
   std::vector<triangle> computeDelaunayTriangulation (std::vector<support_pt> p_support,int32_t right_image);
   void computeDisparityPlanes (std::vector<support_pt> p_support,std::vector<triangle> &tri,int32_t right_image);
   void createGrid (std::vector<support_pt> p_support,int32_t* disparity_grid,int32_t* grid_dims,bool right_image);
-  void find_new_triangles(const uint8_t *exist_pt, const std::vector<support_pt> &pt,
-                          const std::vector<triangle> &tri, std::vector<support_pt> *new_pt, std::vector<triangle> *new_tri);
+  void find_new_triangles(int64_t max_old_id, const std::vector<support_pt> &pt,
+                          const std::vector<triangle> &tri, std::vector<support_pt> *new_pt, std::vector<sparse_triangle> *new_tri);
   // matching
   inline void updatePosteriorMinimum (__m128i* I2_block_addr,const int32_t &d,const int32_t &w,
                                       const __m128i &xmm1,__m128i &xmm2,int32_t &val,int32_t &min_val,int32_t &min_d);
@@ -246,7 +255,7 @@ private:
   std::vector<triangle> tri_1_;
   std::vector<triangle> tri_2_;
   // new triangles
-  std::vector<triangle> tri_left_new_;
+  std::vector<sparse_triangle> tri_left_new_;
 
   // memory aligned input images + dimensions
   uint8_t *I1,*I2;

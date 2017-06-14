@@ -75,7 +75,9 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
   uint8_t *exist_pt = filterSupportPoints();
   //std::cout << "points before filter: " << npts << " after: " << p_support_.size() << std::endl;
   //  print_exist_grid(exist_pt);
+  int64_t max_old_point_id = point_id_;
   std::vector<support_pt> new_points = computeSupportMatches(desc1.I_desc, desc2.I_desc, exist_pt);
+  delete [] exist_pt;
   // add new points to old ones
   p_support_.insert(p_support_.end(), new_points.begin(), new_points.end());
   
@@ -88,8 +90,7 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
 
   tri_left_new_.clear();
   p_support_new_.clear();
-  find_new_triangles(exist_pt, p_support_, tri_1_, &p_support_new_, &tri_left_new_);
-  delete [] exist_pt;
+  find_new_triangles(max_old_point_id, p_support_, tri_1_, &p_support_new_, &tri_left_new_);
 
 //#define DO_EVERYTHING
 #ifdef DO_EVERYTHING
@@ -398,42 +399,34 @@ inline int16_t Elas::computeMatchingDisparity (const int32_t &u,const int32_t &v
     return -1;
 }
 
-void Elas::find_new_triangles(const uint8_t *exist_pt,
+void Elas::find_new_triangles(const int64_t max_old_point_id,
                               const std::vector<support_pt> &pt,
                               const std::vector<triangle> &tri,
                               std::vector<support_pt> *new_pt,
-                              std::vector<triangle> *new_tri) {
-  int32_t ss = param.candidate_stepsize;
-  if (param.subsampling)
-    ss += ss % 2;
-  int32_t dw  = (width + ss - 1) / ss;
-
-  std::set<int> newptset;
-  for (int i = 0; i < pt.size(); i++) {
-    if (!exist_pt[getAddressOffsetImage(pt[i].u/ss, pt[i].v/ss, dw)]) {
-      newptset.insert(i);
-    }
-  }
+                              std::vector<sparse_triangle> *new_tri) {
   // find triangles that have at least one new support point
+  std::set<int64_t> newptset;
   for (int i = 0; i < tri.size(); i++) {
     const triangle &t = tri[i];
-    if (newptset.count(t.c1) > 0 ||
-        newptset.count(t.c2) > 0 ||
-        newptset.count(t.c3) > 0) {
-      new_tri->push_back(t);
+    const int    pidx[3] = {t.c1, t.c2, t.c3};
+    int64_t pid[3];
+    bool isNewTriangle(false);
+    for (int v = 0; v < 3; v++) {
+      int idx = pidx[v];
+      const support_pt &p = pt[idx];
+      pid[v] = p.id;
+      if (p.id >= max_old_point_id) {
+        isNewTriangle = true;
+        if (newptset.count(p.id) == 0) {
+          newptset.insert(p.id);
+          new_pt->push_back(p);
+        }
+      }
     }
-  }
-  // find all support points for new triangles
-  newptset.clear();
-  std::map<int, int> old_to_new;
-  for (int i = 0; i < new_tri->size(); i++) {
-    triangle &t = (*new_tri)[i];
-    if (newptset.count(t.c1) == 0) { newptset.insert(t.c1); old_to_new[t.c1] = new_pt->size(); new_pt->push_back(pt[t.c1]); }
-    if (newptset.count(t.c2) == 0) { newptset.insert(t.c2); old_to_new[t.c2] = new_pt->size(); new_pt->push_back(pt[t.c2]); }
-    if (newptset.count(t.c3) == 0) { newptset.insert(t.c3); old_to_new[t.c3] = new_pt->size(); new_pt->push_back(pt[t.c3]); }
-    t.c1 = old_to_new[t.c1];
-    t.c2 = old_to_new[t.c2];
-    t.c3 = old_to_new[t.c3];
+    if (isNewTriangle) {
+      sparse_triangle st(pidx, pid);
+      new_tri->push_back(st);
+    }
   }
 }
 
