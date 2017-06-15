@@ -657,7 +657,7 @@ public:
     tf::Transform T_world_cam = odom_to_tf(odom_msg) * T_cam_imu.inverse();
 
     std::vector<Elas::support_pt> tpoints;
-    project_points(&tpoints, T_world_cam.inverse());
+    //project_points(&tpoints, T_world_cam.inverse());
     ROS_INFO_STREAM("projected " << tpoints.size() << " out of " << support_pt_cloud_.size());
     elas_->setSupportPoints(tpoints);
     // process
