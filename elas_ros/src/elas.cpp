@@ -87,6 +87,7 @@ class Elas_Proc
 {
 public:
   typedef elas_ros::ElasDynConfig Config;
+  typedef std::vector<Elas::sparse_triangle> TriangleVec;
   Elas_Proc(const std::string& transport)
   {
     ros::NodeHandle local_nh("~");
@@ -192,11 +193,12 @@ public:
     // Synchronize input topics. Optionally do approximate synchronization.
     if (doApproxSync()) {
       approximate_sync_.reset(new ApproximateSync(ApproximatePolicy(queue_size_),
-                                                  left_sub_, right_sub_, left_info_sub_, right_info_sub_, odom_sub_) );
+                                                  left_sub_, right_sub_,
+                                                  left_info_sub_, right_info_sub_, odom_sub_));
       approximate_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4, _5));
     } else {
       exact_sync_.reset(new ExactSync(ExactPolicy(queue_size_),
-                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_, odom_sub_) );
+                                      left_sub_, right_sub_, left_info_sub_, right_info_sub_, odom_sub_));
       exact_sync_->registerCallback(boost::bind(&Elas_Proc::process, this, _1, _2, _3, _4, _5));
     }
   }
@@ -502,10 +504,10 @@ public:
         }
       }
     }
-    //std::cout << "filtered triangles: " << raw.size() << " -> " << filtered->size() << std::endl;
+    std::cout << "filtered triangles: " << raw.size() << " -> " << filtered->size() << std::endl;
   }
-                        
   void project_points(std::vector<Elas::support_pt> *ptp,
+                      Elas_Proc::TriangleVec *triUsed,
                       const tf::Transform &T_cam_world) const {
 #ifdef DEBUG_IMAGE    
     std::ostringstream convert;
@@ -523,6 +525,8 @@ public:
     image_geometry::StereoCameraModel cam = model_;
     const image_geometry::PinholeCameraModel &lcam = cam.left();
     cv::Size res = lcam.fullResolution();
+
+    std::map<int64_t, int> points_used;
     for (SupportPointCloud::const_iterator pci = support_pt_cloud_.begin();
          pci != support_pt_cloud_.end(); ++pci) {
       // transform 3d point to current frame
@@ -531,18 +535,31 @@ public:
       const tf::Vector3 vt(T_cam_world(v));
       cv::Point3d pc(vt.x(), vt.y(), vt.z()); // 3d in camera frame
       if (vt.z() > 0) {
-        // project into left camera image
         double d = cam.getDisparity(vt.z());
         cv::Point2d p2dl = lcam.project3dToPixel(pc);
         if ((p2dl.x > 0) && (p2dl.x < res.width) &&
             (p2dl.y > 0) && (p2dl.y < res.height)) {
+          points_used[pci->first] = ptp->size();
           ptp->push_back(Elas::support_pt(p2dl.x, p2dl.y, (int)round(d), pci->first));
         }
-#ifdef DEBUG_IMAGE        
+#ifdef DEBUG_IMAGE
         point_file << pw.x  << " " << pw.y  << " " << pw.z << " "
                    << pc.x  << " " << pc.y  << " " << pc.z << " "
                    << p2dl.x << " " << p2dl.y << " " << d << std::endl;
 #endif        
+      }
+    }
+    for (TriangleVec::const_iterator it = triangle_cloud_.begin();
+         it != triangle_cloud_.end(); ++it) {
+      const Elas::sparse_triangle &tri = *it;
+      if (points_used.count(tri.c[0]) != 0 &&
+          points_used.count(tri.c[1]) != 0 &&
+          points_used.count(tri.c[2]) != 0) {
+        Elas::sparse_triangle t(tri);
+        t.cidx[0] = points_used[tri.c[0]];
+        t.cidx[1] = points_used[tri.c[1]];
+        t.cidx[2] = points_used[tri.c[2]];
+        triUsed->push_back(t);
       }
     }
   }
@@ -655,11 +672,13 @@ public:
 
     // T_world_cam = T_world_imu * T_imu_cam
     tf::Transform T_world_cam = odom_to_tf(odom_msg) * T_cam_imu.inverse();
-
+    
     std::vector<Elas::support_pt> tpoints;
-    //project_points(&tpoints, T_world_cam.inverse());
+    TriangleVec triUsed;
+    project_points(&tpoints, &triUsed, T_world_cam.inverse());
     ROS_INFO_STREAM("projected " << tpoints.size() << " out of " << support_pt_cloud_.size());
     elas_->setSupportPoints(tpoints);
+    elas_->setExistLeftTriangles(triUsed);
     // process
     elas_->process(l_image_data, r_image_data, l_disp_data, r_disp_data, dims);
 
@@ -669,6 +688,8 @@ public:
     std::vector<elas_ros::SupportPoint3d> new_support_points_3d;
     support_points_to_3d(&new_support_points_3d, elas_->getNewSupportPoints(), T_world_cam);
     add_to_support_point_cloud(new_support_points_3d);
+    const TriangleVec &new_tri = elas_->getNewLeftTriangles();
+    triangle_cloud_.insert(triangle_cloud_.end(), new_tri.begin(), new_tri.end());
  
     // Find the max for scaling the image colour
     float disp_max = 0;
@@ -753,6 +774,7 @@ private:
   Elas::parameters param_;
   typedef std::map<int64_t, cv::Point3d> SupportPointCloud;
   SupportPointCloud support_pt_cloud_;
+  TriangleVec triangle_cloud_;
 };
 
 int main(int argc, char** argv)

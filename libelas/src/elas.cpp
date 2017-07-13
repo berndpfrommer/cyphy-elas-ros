@@ -24,6 +24,7 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 #include <math.h>
 #include <set>
 #include <map>
+#include <unistd.h>
 #include "descriptor.h"
 #include "triangle.h"
 #include "matrix.h"
@@ -31,6 +32,18 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 using namespace std;
 
 Elas::Elas(parameters param) : param(param),  point_id_(1LL) {
+}
+
+static void update_triangles(const std::vector<Elas::support_pt> &pts,
+                             std::vector<Elas::sparse_triangle> *st) {
+  for (int i = 0; i < st->size(); i++) {
+    Elas::sparse_triangle &t =  (*st)[i];
+    Matrix A(3,3);
+    A.val[0][0] = pts[t.cidx[0]].u; A.val[1][0] = pts[t.cidx[0]].v; A.val[2][0] = 1;
+    A.val[0][1] = pts[t.cidx[1]].u; A.val[1][1] = pts[t.cidx[1]].v; A.val[2][1] = 1;
+    A.val[0][2] = pts[t.cidx[2]].u; A.val[1][2] = pts[t.cidx[2]].v; A.val[2][2] = 1;
+    t.Ainv = Matrix::inv(A);
+  }
 }
 
 
@@ -67,27 +80,58 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
   Descriptor desc1(I1,width,height,bpl,param.subsampling);
   Descriptor desc2(I2,width,height,bpl,param.subsampling);
 
+  unsigned int npts = p_support_.size();
+  //int16_t *exist_pt = filterSupportPoints();
+  // update inverse matrix for all triangles
+  std::cout << "updating triangles: " << tri_exist_.size() << std::endl;
+#ifdef PROFILE
+  timer.start("test");
+  usleep(10000);
+  timer.start("update triangles");
+#endif
+  
+  update_triangles(p_support_, &tri_exist_);
+  std::cout << "finding disparity limits: " << p_support_.size() << std::endl;
+#ifdef PROFILE
+  timer.start("find disp limits");
+#endif
+#if 0  
+  std::cout << "points before disparity limits: ---------------" << std::endl;
+  for (int i = 0; i < p_support_.size(); i++) {
+    std::cout << i << " " << p_support_[i].u << " " << p_support_[i].v << " " << p_support_[i].d << std::endl;
+  }
+#endif  
+  int32_t *disp_lim = findDisparityLimits(p_support_, tri_exist_);  
+  //std::cout << "limits: -------------------" << std::endl;
+  //print_exist_grid(disp_lim);
+  int64_t max_old_point_id = point_id_;
 #ifdef PROFILE
   timer.start("Support Matches");
 #endif
 
-  unsigned int npts = p_support_.size();
-  uint8_t *exist_pt = filterSupportPoints();
-  //std::cout << "points before filter: " << npts << " after: " << p_support_.size() << std::endl;
-  //  print_exist_grid(exist_pt);
-  int64_t max_old_point_id = point_id_;
-  std::vector<support_pt> new_points = computeSupportMatches(desc1.I_desc, desc2.I_desc, exist_pt);
-  delete [] exist_pt;
+  std::vector<support_pt> new_points = computeSupportMatches(desc1.I_desc, desc2.I_desc, disp_lim, p_support_,
+                                                             tri_exist_);
+#if 0  
+  std::cout << "new support points: ---------------" << std::endl;
+  for (int i = 0; i < new_points.size(); i++) {
+    std::cout << new_points[i].u << " " << new_points[i].v << " " << new_points[i].d << std::endl;
+  }
+#endif  
+  //delete [] exist_pt;
+  delete [] disp_lim;
   // add new points to old ones
   p_support_.insert(p_support_.end(), new_points.begin(), new_points.end());
-  
-
+  std::cout << "old points: " << p_support_.size() << ", new points: " << new_points.size() <<
+    ", total: " << p_support_.size() + new_points.size() << std::endl;
 #ifdef PROFILE
   timer.start("Delaunay Triangulation");
 #endif
   tri_1_ = computeDelaunayTriangulation(p_support_,0);
-  tri_2_ = computeDelaunayTriangulation(p_support_,1);
+  //tri_2_ = computeDelaunayTriangulation(p_support_,1);
 
+#ifdef PROFILE
+  timer.start("Find new triangles");
+#endif
   tri_left_new_.clear();
   p_support_new_.clear();
   find_new_triangles(max_old_point_id, p_support_, tri_1_, &p_support_new_, &tri_left_new_);
@@ -149,9 +193,11 @@ void Elas::process (uint8_t* I1_,uint8_t* I2_,float* D1,float* D2,const int32_t*
       median(D2);
   }
 
+#endif
+
 #ifdef PROFILE
   timer.plot();
-#endif
+  timer.reset();
 #endif
 
   // release memory
@@ -430,28 +476,58 @@ void Elas::find_new_triangles(const int64_t max_old_point_id,
   }
 }
 
-void Elas::print_exist_grid(const uint8_t *grid) {
+void Elas::print_exist_grid(const int32_t *grid) {
   int32_t D_candidate_stepsize = param.candidate_stepsize;
   if (param.subsampling)
     D_candidate_stepsize += D_candidate_stepsize%2; // huh?
   // create matrix for saving disparity candidates
   int32_t D_can_width  = (width + D_candidate_stepsize - 1) / D_candidate_stepsize;
   int32_t D_can_height = (height + D_candidate_stepsize - 1) / D_candidate_stepsize;
-  int sum(0);
-  for (int i = 0; i < D_can_width * D_can_height; i++) {
-    sum += grid[i];
+  std::cout << "min disp limit: ---------------------" << std::endl;
+  for (int32_t v_can=0; v_can<D_can_height; v_can++) {
+    for (int32_t u_can=0; u_can<D_can_width; u_can++) {
+      int val = (int)*(grid + 2 * getAddressOffsetImage(u_can,v_can,D_can_width));
+      cout << " " << val;
+    }
+    std::cout << std::endl;
   }
-  std::cout << "total number occupied cells: " << sum << std::endl;
-  for (int32_t u_can=0; u_can<D_can_width; u_can++) {
-    for (int32_t v_can=0; v_can<D_can_height; v_can++) {
-      int val = (int)*(grid + getAddressOffsetImage(u_can,v_can,D_can_width));
+  std::cout << "max disp limit: ---------------------" << std::endl;
+  for (int32_t v_can=0; v_can<D_can_height; v_can++) {
+    for (int32_t u_can=0; u_can<D_can_width; u_can++) {
+      int val = (int)*(grid + 2 * getAddressOffsetImage(u_can,v_can,D_can_width)+1);
       cout << " " << val;
     }
     std::cout << std::endl;
   }
 }
 
-uint8_t *Elas::filterSupportPoints() {
+static float get_depth(const std::vector<Elas::support_pt> &pts,
+                       const Elas::sparse_triangle &t, int u, int v) {
+  Matrix uv1(3,1);
+  uv1.val[0][0] = u;  uv1.val[0][1] = v; uv1.val[0][2] = 1;
+  Matrix lambda(3,1);
+  Matrix ainv(t.Ainv);
+  lambda = ainv * uv1;
+#if 0  
+  std::cout << "uv1:    " << uv1 << std::endl;
+  std::cout << "ainv:   " << ainv << std::endl;
+  std::cout << "lambda: " << lambda << std::endl;
+#endif  
+  if (lambda.val[0][0] >=   0 && lambda.val[0][0] <= 1.0 &&
+      lambda.val[1][0] >=   0 && lambda.val[1][0] <= 1.0 &&
+      lambda.val[2][0] >=   0 && lambda.val[2][0] <= 1.0) {
+    return (lambda.val[0][0] * pts[t.c[0]].d +
+            lambda.val[1][0] * pts[t.c[1]].d +
+            lambda.val[2][0] * pts[t.c[2]].d);
+  }
+  return (-1.0);
+}
+
+int32_t *Elas::findDisparityLimits(const std::vector<Elas::support_pt> &pts,
+                                   const std::vector<Elas::sparse_triangle> &tri) const {
+  //
+  // set up and allocate grid
+  //
   int32_t ss = param.candidate_stepsize;
   if (param.subsampling) {
     ss += ss % 2;
@@ -460,9 +536,53 @@ uint8_t *Elas::filterSupportPoints() {
   int32_t D_can_height = (height + ss - 1) / ss;
 
   int sz = D_can_width * D_can_height;
-  uint8_t *occ_grid = new uint8_t[sz];
-  memset(occ_grid, 0, sizeof(uint8_t) * sz);
+  int32_t *lim_grid = new int32_t[sz * 2];
+  for (int i = 0; i < sz * 2; i++) {
+    lim_grid[i] = -1;
+  }
 
+  //
+  // find depth limits
+  //
+  
+  for (int i = 0; i < tri.size(); i++) {
+    const Elas::sparse_triangle &t = tri[i];
+    int umin = min(min(pts[t.cidx[0]].u, pts[t.cidx[1]].u), pts[t.cidx[2]].u);
+    int umax = max(max(pts[t.cidx[0]].u, pts[t.cidx[1]].u), pts[t.cidx[2]].u);
+    int vmin = min(min(pts[t.cidx[0]].v, pts[t.cidx[1]].v), pts[t.cidx[2]].v);
+    int vmax = max(max(pts[t.cidx[0]].v, pts[t.cidx[1]].v), pts[t.cidx[2]].v);
+    const int ucan_start(umin/ss), ucan_end(umax/ss);
+    const int vcan_start(vmin/ss), vcan_end(vmax/ss);
+    for (int ucan = ucan_start; ucan < ucan_end; ucan++) {
+      for (int vcan = vcan_start; vcan < vcan_end; vcan++) {
+        float d = get_depth(pts, t, ucan * ss, vcan * ss);
+        if (d >= 0) {
+          int addr = getAddressOffsetImage(ucan, vcan, D_can_width);
+          lim_grid[2 * addr]     = max(0, (int) (d - 1.0));
+          lim_grid[2 * addr + 1] = min(param.disp_max, (int) (d + 1.0));
+        }
+      }
+    }
+  }
+  return lim_grid;
+}
+
+
+int16_t *Elas::filterSupportPoints() {
+  int32_t ss = param.candidate_stepsize;
+  if (param.subsampling) {
+    ss += ss % 2;
+  }
+  int32_t D_can_width  = (width  + ss - 1) / ss;
+  int32_t D_can_height = (height + ss - 1) / ss;
+
+  int sz = D_can_width * D_can_height;
+  int16_t *occ_grid = new int16_t[sz];
+  for (int i = 0; i < sz; i++) {
+    occ_grid[i] = -1;
+  }
+
+#if 0
   typedef std::map<int, support_pt> addr_to_pt;
   addr_to_pt new_pts;
   for (int i = 0; i < p_support_.size(); i++) {
@@ -471,13 +591,14 @@ uint8_t *Elas::filterSupportPoints() {
     if (addr < 0 || addr >= sz) {
       std::cout << "error: " << p.u << " " << p.v << " addr: " << addr << " > " << sz << std::endl;
     }
-    occ_grid[addr] = 1;
     addr_to_pt::const_iterator npi = new_pts.find(addr);
     if (npi == new_pts.end()) {
       new_pts[addr] = p;  // insert new point
+      occ_grid[addr] = p.d;
     } else {
       if (npi->second.id < p.id) {
         new_pts[addr] = p;  // replace older point by newer one
+        occ_grid[addr] = p.d;
       }
     }
   }
@@ -485,12 +606,16 @@ uint8_t *Elas::filterSupportPoints() {
   for (addr_to_pt::const_iterator it = new_pts.begin(); it != new_pts.end(); ++it) {
     p_support_.push_back(it->second);
   }
-
+#endif
+  
   return (occ_grid);
 }
 
-vector<Elas::support_pt> Elas::computeSupportMatches (uint8_t* I1_desc,uint8_t* I2_desc,
-                                                      const uint8_t *exist_pt) {
+
+vector<Elas::support_pt> Elas::computeSupportMatches(uint8_t* I1_desc,uint8_t* I2_desc,
+                                                     const int32_t *disp_lim,
+                                                     const std::vector<support_pt> &oldpts,
+                                                     const std::vector<sparse_triangle> &oldtri) {
   // be sure that at half resolution we only need data
   // from every second line!
   int32_t D_candidate_stepsize = param.candidate_stepsize;
@@ -517,24 +642,27 @@ vector<Elas::support_pt> Elas::computeSupportMatches (uint8_t* I1_desc,uint8_t* 
       // initialize disparity candidate to invalid
       *(D_can+getAddressOffsetImage(u_can,v_can,D_can_width)) = -1;
 
-      // check if already have a point there
-      if (exist_pt[getAddressOffsetImage(u_can, v_can, D_can_width)]) {
-        num_skipped++;
-        continue;
-      }
       // find forwards
       d = computeMatchingDisparity(u,v,I1_desc,I2_desc,false);
       if (d>=0) {
         // find backwards
         d2 = computeMatchingDisparity(u-d,v,I1_desc,I2_desc,true);
         if (d2>=0 && abs(d-d2)<=param.lr_threshold) {
-          *(D_can+getAddressOffsetImage(u_can,v_can,D_can_width)) = d;
-          num_new++;
+          // check if this point falls within disparity range
+          int addr = getAddressOffsetImage(u_can, v_can, D_can_width);
+          if (d < disp_lim[2 * addr] || d > disp_lim[2 * addr + 1]) {
+            *(D_can+getAddressOffsetImage(u_can,v_can,D_can_width)) = d;
+            num_new++;
+            std::cout << u << "," << v << ", new pt:  " << d << " lim: " << disp_lim[2 * addr] << " " << disp_lim [2 * addr+ 1] << std::endl;
+          } else {
+            std::cout << u << "," << v << ", skipped: " << d << " lim: " << disp_lim[2 * addr] << " " << disp_lim [2 * addr+ 1] << std::endl;
+            num_skipped++;
+          }
         }
       }
     }
   }
-  //std::cout << "num new: " << num_new << " num skipped: " << num_skipped << std::endl;
+  std::cout << "num new: " << num_new << " num skipped: " << num_skipped << std::endl;
   
   // remove inconsistent support points
   removeInconsistentSupportPoints(D_can,D_can_width,D_can_height);
@@ -550,11 +678,12 @@ vector<Elas::support_pt> Elas::computeSupportMatches (uint8_t* I1_desc,uint8_t* 
   //std::cout << "top id before support point matches: " << point_id_ << std::endl;
   for (int32_t u_can=1; u_can<D_can_width; u_can++)
     for (int32_t v_can=1; v_can<D_can_height; v_can++)
-      if (*(D_can+getAddressOffsetImage(u_can,v_can,D_can_width))>=0)
+      if (*(D_can+getAddressOffsetImage(u_can,v_can,D_can_width))>=0) {
         p_support.push_back(support_pt(u_can*D_candidate_stepsize,
                                        v_can*D_candidate_stepsize,
                                        *(D_can+getAddressOffsetImage(u_can,v_can,D_can_width)),
                                        point_id_++));
+      }
   
   // if flag is set, add support points in image corners
   // with the same disparity as the nearest neighbor support point
@@ -568,17 +697,10 @@ vector<Elas::support_pt> Elas::computeSupportMatches (uint8_t* I1_desc,uint8_t* 
   return p_support; 
 }
 
-vector<Elas::triangle> Elas::computeDelaunayTriangulation (vector<support_pt> p_support,int32_t right_image) {
-#if 0  
-  if (p_support.size() < 3) {
-    // not enough points!
-    return (vector<Elas::triangle>());
-  }
-#endif  
+vector<Elas::triangle> Elas::computeDelaunayTriangulation (const vector<support_pt> &p_support,int32_t right_image) {
   // input/output structure for triangulation
   struct triangulateio in, out;
   int32_t k;
-
   // inputs
   in.numberofpoints = p_support.size();
   in.pointlist = (float*)malloc(in.numberofpoints*2*sizeof(float));
@@ -613,16 +735,20 @@ vector<Elas::triangle> Elas::computeDelaunayTriangulation (vector<support_pt> p_
   out.segmentmarkerlist      = NULL;
   out.edgelist               = NULL;
   out.edgemarkerlist         = NULL;
-
   // do triangulation (z=zero-based, n=neighbors, Q=quiet, B=no boundary markers)
   char parameters[] = "zQB";
   triangulate(parameters, &in, &out, NULL);
-  
   // put resulting triangles into vector tri
   vector<triangle> tri;
   k=0;
   for (int32_t i=0; i<out.numberoftriangles; i++) {
-    tri.push_back(triangle(out.trianglelist[k],out.trianglelist[k+1],out.trianglelist[k+2]));
+    triangle t(out.trianglelist[k],out.trianglelist[k+1],out.trianglelist[k+2]);
+    Matrix A(3,3);
+    A.val[0][0] = p_support[t.c1].u; A.val[1][0] = p_support[t.c1].v; A.val[2][0] = 1;
+    A.val[0][1] = p_support[t.c2].u; A.val[1][1] = p_support[t.c2].v; A.val[2][1] = 1;
+    A.val[0][2] = p_support[t.c3].u; A.val[1][2] = p_support[t.c3].v; A.val[2][2] = 1;
+    t.Ainv = Matrix::inv(A);
+    tri.push_back(t);
     k+=3;
   }
   

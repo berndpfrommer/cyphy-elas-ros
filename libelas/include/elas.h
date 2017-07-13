@@ -30,6 +30,9 @@ Street, Fifth Floor, Boston, MA 02110-1301, USA
 #include <stdlib.h>
 #include <vector>
 #include <emmintrin.h>
+#include "matrix.h"
+
+#define PROFILE
 
 // define fixed-width datatypes for Visual Studio projects
 #ifndef _MSC_VER
@@ -172,12 +175,14 @@ public:
     int32_t c1,c2,c3;
     float   t1a,t1b,t1c;
     float   t2a,t2b,t2c;
+    Matrix  Ainv;
     triangle(int32_t c1,int32_t c2,int32_t c3):c1(c1),c2(c2),c3(c3){}
   };
 
   struct sparse_triangle {
-    int     cidx[3];
-    int64_t c[3];
+    int     cidx[3];  // current local index of corner points
+    int64_t c[3];     // id of corner points
+    Matrix  Ainv;
     sparse_triangle(const int *cidx_a, const int64_t *c_a) {
       memcpy(cidx, cidx_a, sizeof(cidx));
       memcpy(c, c_a, sizeof(c));
@@ -186,6 +191,8 @@ public:
 
   // sets support points
   void setSupportPoints(std::vector<support_pt> const &sp) { p_support_ = sp; }
+  // sets exist left triangles
+  void setExistLeftTriangles(std::vector<sparse_triangle> const &te) { tri_exist_ = te; }
   // returns support points
   const std::vector<support_pt> &getSupportPoints() const { return (p_support_); }
   // returns new support points
@@ -204,23 +211,26 @@ private:
   inline uint32_t getAddressOffsetGrid (const int32_t& x,const int32_t& y,const int32_t& d,const int32_t& width,const int32_t& disp_num) {
     return (y*width+x)*disp_num+d;
   }
-  void print_exist_grid(const uint8_t *grid);
-
+  void print_exist_grid(const int32_t *grid);
+  
   // support point functions
   void removeInconsistentSupportPoints (int16_t* D_can,int32_t D_can_width,int32_t D_can_height);
   void removeRedundantSupportPoints (int16_t* D_can,int32_t D_can_width,int32_t D_can_height,
                                      int32_t redun_max_dist, int32_t redun_threshold, bool vertical);
   void addCornerSupportPoints (std::vector<support_pt> &p_support);
   inline int16_t computeMatchingDisparity (const int32_t &u,const int32_t &v,uint8_t* I1_desc,uint8_t* I2_desc,const bool &right_image);
-  uint8_t *filterSupportPoints();
-  std::vector<support_pt> computeSupportMatches (uint8_t* I1_desc,uint8_t* I2_desc, const uint8_t *exist_pt);
+  int16_t *filterSupportPoints();
+  std::vector<support_pt> computeSupportMatches (uint8_t* I1_desc,uint8_t* I2_desc, const int32_t *disp_lim,
+                                                 const std::vector<support_pt> &pt, const std::vector<sparse_triangle> &oldtri);
 
   // triangulation & grid
-  std::vector<triangle> computeDelaunayTriangulation (std::vector<support_pt> p_support,int32_t right_image);
+  std::vector<triangle> computeDelaunayTriangulation (const std::vector<support_pt> &p_support,int32_t right_image);
   void computeDisparityPlanes (std::vector<support_pt> p_support,std::vector<triangle> &tri,int32_t right_image);
   void createGrid (std::vector<support_pt> p_support,int32_t* disparity_grid,int32_t* grid_dims,bool right_image);
   void find_new_triangles(int64_t max_old_id, const std::vector<support_pt> &pt,
                           const std::vector<triangle> &tri, std::vector<support_pt> *new_pt, std::vector<sparse_triangle> *new_tri);
+  int32_t *findDisparityLimits(const std::vector<Elas::support_pt> &pts,
+                               const std::vector<Elas::sparse_triangle> &tri) const;
   // matching
   inline void updatePosteriorMinimum (__m128i* I2_block_addr,const int32_t &d,const int32_t &w,
                                       const __m128i &xmm1,__m128i &xmm2,int32_t &val,int32_t &min_val,int32_t &min_d);
@@ -254,6 +264,9 @@ private:
   // left and right triangles
   std::vector<triangle> tri_1_;
   std::vector<triangle> tri_2_;
+
+  // existing triangles
+  std::vector<sparse_triangle> tri_exist_;
   // new triangles
   std::vector<sparse_triangle> tri_left_new_;
 
